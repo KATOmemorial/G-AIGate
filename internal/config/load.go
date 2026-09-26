@@ -67,6 +67,11 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
+	// 敏感项只认环境变量（10.1 §3）：绕开 viper 直接读 env。
+	// 不走 viper 的原因：配置文件中同名空节（如 `secret:`）会遮蔽
+	// AutomaticEnv 对嵌套 key 的读取，行为脆弱；直接读 env 语义更准。
+	cfg.MySQL.Password = os.Getenv("GAIGATE_MYSQL_PASSWORD")
+	cfg.Secret.MasterKey = os.Getenv("GAIGATE_SECRET_MASTER_KEY")
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -82,7 +87,7 @@ func fileExists(path string) bool {
 }
 
 // setDefaults 注册全量默认值（10.1 §3 各字段注释），与 config.example.yaml 一一对应。
-// 敏感项默认值为空串占位：仅为把 key 纳入 AllKeys 以支持环境变量覆盖。
+// 敏感项（mysql.password / secret.master-key）不注册默认值：不走 viper，见 Load。
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.addr", ":8080")
 	v.SetDefault("server.metrics-addr", ":9101")
@@ -92,7 +97,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("mysql.port", 3306)
 	v.SetDefault("mysql.user", "root")
 	v.SetDefault("mysql.database", "gaigate")
-	v.SetDefault("mysql.password", "")
 	v.SetDefault("redis.addr", "127.0.0.1:6379")
 	v.SetDefault("redis.db", 0)
 	v.SetDefault("proxy.ttfb-timeout", 10*time.Second)
@@ -108,7 +112,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("router.default-strategy", "weighted")
 	v.SetDefault("meter.estimate-chars-per-token", 4.0)
 	v.SetDefault("meter.settle-queue-size", 1024)
-	v.SetDefault("secret.master-key", "")
 }
 
 // validate 执行 fail-fast 校验（10.1 §3 校验规则），收集全部违规后一次性报出。
