@@ -1,0 +1,18 @@
+# golangci-lint 配置（01-工程规范 §1：静态检查基线）
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - misspell
+
+issues:
+  exclude-rules:
+    # 测试文件允许 magic 常量与非导出错误检查
+    - path: _test\.go
+      linters:
+        - errcheck

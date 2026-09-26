@@ -20,3 +20,6 @@ Thumbs.db
 
 # 本地临时
 tmp/
+
+# 本地配置（模板见 config.example.yaml；01-工程规范 §7）
+config.yaml
