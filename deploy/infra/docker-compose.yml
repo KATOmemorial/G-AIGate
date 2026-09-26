@@ -1,0 +1,88 @@
+# G-AIGate 中间件组（仅中间件，网关与 mock 在宿主机 go run）
+#
+# 一键启动:  docker compose up -d      （首次会自动创建 .env，见下方说明）
+# 一键停止:  docker compose down       （数据卷保留）
+# 彻底重置:  docker compose down -v
+#
+# 端口分配（与 10.1 配置默认值一致）:
+#   MySQL 3306 | Redis 6379 | Prometheus 9090 | Grafana 3000 | Jaeger UI 16686 / OTLP 4317,4318
+# 网关本体（宿主机）: 业务 :8080 | 指标 :9101 | mock-provider :18080
+#
+# 注意: 本组仅限本机开发，未设 Redis 密码、MySQL 用开发口令，勿暴露公网。
+
+name: gaigate-infra
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: gaigate-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?see .env.example}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?see .env.example}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: gaigate-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: gaigate-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Linux 兼容；Win/Mac 的 Docker Desktop 自带
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: gaigate-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?see .env.example}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: gaigate-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317"   # OTLP gRPC（网关 OTel SDK 导出目标）
+      - "4318:4318"   # OTLP HTTP
+
+volumes:
+  mysql-data:
+  redis-data:
+  prom-data:
+  grafana-data:

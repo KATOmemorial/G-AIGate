@@ -1,0 +1,22 @@
+# 环境与密钥（01-工程规范 §7：敏感项不入库）
+.env
+*.pem
+*.key
+
+# Go 构建产物
+/bin/
+*.exe
+*.exe~
+*.test
+*.out
+coverage.*
+vendor/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 本地临时
+tmp/

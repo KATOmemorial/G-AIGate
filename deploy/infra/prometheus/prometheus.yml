@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # 网关跑在宿主机，容器经 host.docker.internal 抓取其指标端口（默认 :9101）
+  - job_name: gaigate
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
