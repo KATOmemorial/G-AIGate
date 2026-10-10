@@ -93,8 +93,10 @@ func TestRecoverReturns500WithGaigateInternal(t *testing.T) {
 	assert.Equal(t, w.Header().Get("X-Request-Id"), body.RequestID)
 }
 
-// 用例③（10.2 §5）：契约顺序 RequestID → Recover → AccessLog 下，
-// AccessLog 输出必含 request_id（正常与 panic 请求均须输出摘要行）。
+// 用例③（10.2 §5，契约 2026-10-10 修正）：契约顺序
+// RequestID → AccessLog → Recover 下，AccessLog 输出必含 request_id
+// （正常与 panic 请求均须输出摘要行），且 panic 请求的 request_done
+// 记录真实 status_code=500（Recover 先写 500，AccessLog 的 defer 后执行）。
 func TestPipelineOrderAccessLogContainsRequestID(t *testing.T) {
 	var buf bytes.Buffer
 	logger := newCapturingLogger(&buf)
@@ -103,7 +105,7 @@ func TestPipelineOrderAccessLogContainsRequestID(t *testing.T) {
 	slog.SetDefault(logger)
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	r := gin.New()
-	r.Use(RequestID(), Recover(), AccessLog(logger))
+	r.Use(RequestID(), AccessLog(logger), Recover())
 	r.GET("/ok", func(c *gin.Context) { c.JSON(200, gin.H{}) })
 	r.GET("/boom", func(c *gin.Context) { panic("boom for test") })
 
@@ -122,13 +124,16 @@ func TestPipelineOrderAccessLogContainsRequestID(t *testing.T) {
 	assert.Equal(t, "", entry["model"])
 	assert.Contains(t, entry, "latency_ms")
 
-	// panic 请求：request_done 仍输出且带 request_id（AccessLog 在 Recover 之内）
+	// panic 请求：request_done 仍输出且带 request_id；Recover 已先写出 500，
+	// AccessLog 的 defer 记录真实 status_code（契约修正的核心验收点）
 	buf.Reset()
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest("GET", "/boom", nil))
 	require.Equal(t, 500, w.Code)
 	entry = findLogEntry(t, &buf, "request_done")
 	assert.Equal(t, w.Header().Get("X-Request-Id"), entry["request_id"])
+	assert.EqualValues(t, 500, entry["status_code"])
+	assert.Equal(t, "5xx", entry["status_class"])
 
 	// panic 堆栈日志（Recover 产出）也带同一 request_id，且含堆栈
 	stackEntry := findLogEntry(t, &buf, "panic recovered")

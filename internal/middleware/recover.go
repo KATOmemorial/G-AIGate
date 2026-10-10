@@ -10,8 +10,9 @@ import (
 
 // Recover panic 恢复中间件（10.2 §3 契约）：panic → 500 +
 // OpenAI 风格错误体（code=gaigate_internal，00 §8.2）+ 带堆栈与
-// request_id 的 Error 日志。位于 AccessLog 之外，panic 恢复后
-// AccessLog 的 defer 摘要仍会带 request_id 输出。
+// request_id 的 Error 日志。位于 AccessLog 之内（后注册）：
+// panic 展栈时本中间件的 defer 先执行写出 500，AccessLog 的
+// defer 后执行，request_done 得以记录真实 status_code。
 func Recover() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {

@@ -15,10 +15,11 @@ import (
 // 业务字段由后续模块通过 ctx 注入（context.go 的 With* 入口），
 // B2 阶段为零值占位。
 //
-// 摘要在 defer 中输出：panic 请求也能产出 request_done（AccessLog 在
-// Recover 之内，10.2 §3 契约）。已知取舍：panic 时刻响应尚未写出
-// （外层 Recover 的 defer 随后才写 500），status_code 记为 gin 默认值 200；
-// 请求的真实结果以 panic 日志与 500 响应为准。
+// 管道顺序（10.2 §3 契约，2026-10-10 修正）：RequestID → AccessLog → Recover。
+// AccessLog 在 Recover 之外（先注册）：panic 展栈时内层 defer 先执行，
+// Recover 先接住 panic 并写出 500，本中间件的 defer 后执行，
+// status_code 记录真实值。已知取舍：AccessLog 自身 panic 不受
+// Recover 保护（薄代码，风险接受，文档 §3 已注明）。
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
