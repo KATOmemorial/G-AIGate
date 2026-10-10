@@ -60,6 +60,8 @@ func main() {
 
 	srv := &http.Server{Addr: cfg.Server.Addr, Handler: r}
 
+	logger.Info("g-aigate 启动", "addr", cfg.Server.Addr)
+
 	serveErr := make(chan error, 1)
 	// 服务主循环 goroutine：非请求路径，01 §3 的请求路径裸 go 禁令不适用
 	go func() { serveErr <- srv.ListenAndServe() }()
