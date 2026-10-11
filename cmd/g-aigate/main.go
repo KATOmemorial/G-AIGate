@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 
 	"gaigate/internal/config"
 	"gaigate/internal/middleware"
+	"gaigate/internal/store"
 )
 
 // dependency 优雅关闭的依赖项（10.2 §3）：按装配顺序登记，关闭时
@@ -50,15 +52,63 @@ func main() {
 	r.Use(middleware.RequestID(), middleware.AccessLog(logger), middleware.Recover())
 
 	// 探针（10-L1 §3 决策②）：/healthz liveness 恒 200；/readyz 由
-	// Probes 动态注册检查项。B2 末 store（11.x）就绪后在此注册
-	// MySQL/Redis ping（10.2 §4 决策①）；当前 0 检查项 → 200。
+	// Probes 动态注册检查项（10.2 §4 决策①）。
 	probes := &middleware.Probes{}
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	r.GET("/readyz", probes.ReadyHandler())
 
-	// 优雅关闭依赖列表：按装配顺序登记，逆序关闭；当前为空
-	// （store 未建，11.x 交付后按序追加）
-	deps := []dependency{}
+	// store 装配（11.1 §2）：启动迁移（GET_LOCK 防多副本并发）→
+	// GORM 客户端 → 幂等 seed。任何一步失败均 fail-fast 退出（exit 1）。
+	storeOpts := store.Options{
+		Host:     cfg.MySQL.Host,
+		Port:     cfg.MySQL.Port,
+		User:     cfg.MySQL.User,
+		Password: cfg.MySQL.Password,
+		Database: cfg.MySQL.Database,
+	}
+	if err := store.RunMigrations(storeOpts, "migrations"); err != nil {
+		logger.Error("数据库迁移失败", "err", err.Error())
+		os.Exit(1)
+	}
+	db, err := store.Open(storeOpts)
+	if err != nil {
+		logger.Error("MySQL 连接失败", "err", err.Error())
+		os.Exit(1)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		logger.Error("获取 MySQL 底层连接失败", "err", err.Error())
+		os.Exit(1)
+	}
+	// config 已校验 MasterKey 为 base64 且解码后 32 字节；此处解码失败
+	// 理论不可达，防御性退出
+	masterKey, err := base64.StdEncoding.DecodeString(cfg.Secret.MasterKey)
+	if err != nil {
+		logger.Error("master key 解码失败", "err", err.Error())
+		os.Exit(1)
+	}
+	if err := store.Seed(db, store.SeedOptions{
+		// GAIGATE_ADMIN_PASSWORD 未设置时 seed 内回退 admin123（仅 dev，11.1 §3）
+		AdminPassword: os.Getenv("GAIGATE_ADMIN_PASSWORD"),
+		MasterKey:     masterKey,
+	}); err != nil {
+		logger.Error("seed 失败", "err", err.Error())
+		os.Exit(1)
+	}
+
+	// readyz 注册 MySQL ping（10.2 注释要求 check 自带超时，防挂起拖住 /readyz）
+	probes.Register("mysql", func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return sqlDB.PingContext(ctx)
+	})
+
+	// 优雅关闭依赖列表：按装配顺序登记，逆序关闭。后续按序追加：
+	// 11.4 redis → 11.3 落账 drain（关闭顺序 drain → redis → mysql，
+	// 落账队列必须先 drain 再关 DB，否则丢账，10.2 §4 决策②）。
+	deps := []dependency{
+		{name: "mysql", close: func(ctx context.Context) error { return sqlDB.Close() }},
+	}
 
 	srv := &http.Server{Addr: cfg.Server.Addr, Handler: r}
 
