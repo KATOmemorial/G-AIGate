@@ -1,4 +1,6 @@
 # golangci-lint 配置（01-工程规范 §1：静态检查基线）
+# v2 语法：exclusions 规则须挂在 linters.exclusions.rules 下
+# （v1 的 issues.exclude-rules 在 v2 下被静默忽略，导致测试豁免失效）。
 version: "2"
 
 linters:
@@ -9,10 +11,9 @@ linters:
     - unused
     - ineffassign
     - misspell
-
-issues:
-  exclude-rules:
-    # 测试文件允许 magic 常量与非导出错误检查
-    - path: _test\.go
-      linters:
-        - errcheck
+  exclusions:
+    rules:
+      # 测试文件允许 magic 常量与非导出错误检查
+      - path: _test\.go
+        linters:
+          - errcheck
