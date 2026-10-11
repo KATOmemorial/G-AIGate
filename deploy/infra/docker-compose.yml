@@ -71,15 +71,18 @@ services:
     depends_on:
       - prometheus
 
-  jaeger:
-    image: jaegertracing/all-in-one:1.62
-    container_name: gaigate-jaeger
-    environment:
-      COLLECTOR_OTLP_ENABLED: "true"
-    ports:
-      - "16686:16686" # Jaeger UI
-      - "4317:4317"   # OTLP gRPC（网关 OTel SDK 导出目标）
-      - "4318:4318"   # OTLP HTTP
+  # jaeger：首个消费者是 18.2（OTel 链路，B7），此前无模块依赖。
+  # all-in-one:1.62 镜像拉取失败（2026-10-11 实测），all-in-one 1.x 线已 EOL；
+  # TODO(18.2): 验证 jaegertracing/jaeger 2.x 镜像后恢复本服务与端口（16686/4317/4318）。
+  # jaeger:
+  #   image: jaegertracing/all-in-one:1.62
+  #   container_name: gaigate-jaeger
+  #   environment:
+  #     COLLECTOR_OTLP_ENABLED: "true"
+  #   ports:
+  #     - "16686:16686" # Jaeger UI
+  #     - "4317:4317"   # OTLP gRPC（网关 OTel SDK 导出目标）
+  #     - "4318:4318"   # OTLP HTTP
 
 volumes:
   mysql-data:
