@@ -175,7 +175,10 @@ func ensureChannel(tx *gorm.DB, name string, priority, weight int32, now time.Ti
 		c = Channel{
 			Name: name, Provider: seedChannelProvider, BaseURL: seedChannelBaseURL,
 			Priority: priority, Weight: weight, Enabled: true,
-			CreatedAt: now, UpdatedAt: now,
+			// 显式置 unknown：GORM Create 会写入零值 ""、覆盖 DDL 默认（评审遗留项，
+			// 见 docs/spec/02-遗留事项台账.md #1）。14.3 落地后该列由其异步维护。
+			HealthStatus: "unknown",
+			CreatedAt:    now, UpdatedAt: now,
 		}
 		if err := tx.Create(&c).Error; err != nil {
 			return 0, fmt.Errorf("store: seed 写入 channels: %w", err)
@@ -185,18 +188,25 @@ func ensureChannel(tx *gorm.DB, name string, priority, weight int32, now time.Ti
 	if err != nil {
 		return 0, fmt.Errorf("store: seed 查询 channels: %w", err)
 	}
+	// 规格一致零写（幂等短路）：health_status 为空串视为待自愈，不走短路。
 	if c.Provider == seedChannelProvider && c.BaseURL == seedChannelBaseURL &&
-		c.Priority == priority && c.Weight == weight && c.Enabled {
+		c.Priority == priority && c.Weight == weight && c.Enabled && c.HealthStatus != "" {
 		return c.ID, nil
 	}
-	if err := tx.Model(&Channel{}).Where("id = ?", c.ID).Updates(map[string]any{
+	updates := map[string]any{
 		"provider":   seedChannelProvider,
 		"base_url":   seedChannelBaseURL,
 		"priority":   priority,
 		"weight":     weight,
 		"enabled":    true,
 		"updated_at": now,
-	}).Error; err != nil {
+	}
+	if c.HealthStatus == "" {
+		// 旧库自愈：11.1 首版 seed 写入过 ""，仅归一为 unknown；
+		// 不覆盖 14.3 将来写入的真实状态（disabled/degraded 等）。
+		updates["health_status"] = "unknown"
+	}
+	if err := tx.Model(&Channel{}).Where("id = ?", c.ID).Updates(updates).Error; err != nil {
 		return 0, fmt.Errorf("store: seed 更新 channels: %w", err)
 	}
 	return c.ID, nil

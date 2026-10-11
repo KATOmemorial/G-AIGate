@@ -106,6 +106,11 @@ func TestSeed_CreatesExpectedRows(t *testing.T) {
 	if primary.Provider != "openai" || primary.BaseURL != "http://127.0.0.1:18080" {
 		t.Errorf("渠道 provider/base_url 不符: %+v", primary)
 	}
+	// 台账 #1：新建渠道 health_status 必须显式为 unknown（非 ""、覆盖 DDL 默认的幂等证据）
+	if primary.HealthStatus != "unknown" || fallback.HealthStatus != "unknown" {
+		t.Errorf("渠道 health_status 应为 unknown: primary=%q fallback=%q",
+			primary.HealthStatus, fallback.HealthStatus)
+	}
 
 	// admin 用户：default 组、admin 角色、密码 bcrypt 可验
 	var admin User
@@ -217,6 +222,40 @@ func TestSeed_IdempotentOnRestart(t *testing.T) {
 		if string(ciphers[i]) != string(afterCiphers[i]) {
 			t.Errorf("渠道 Key %d 密文在重启后被重写（应为零写）", i)
 		}
+	}
+}
+
+func TestSeed_HealsEmptyHealthStatus(t *testing.T) {
+	// 台账 #1 旧库自愈：11.1 首版 seed 写入过 ""，重启后应归一为 unknown，
+	// 且不覆盖未来 14.3 写入的真实状态（disabled 等应保持不动）。
+	db := migratedTestDB(t)
+	opts := SeedOptions{AdminPassword: "admin-test", MasterKey: testMasterKey()}
+	if err := Seed(db, opts); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if err := db.Model(&Channel{}).Where("name = ?", "demo-primary").
+		Update("health_status", "").Error; err != nil {
+		t.Fatalf("模拟旧库空串: %v", err)
+	}
+	if err := db.Model(&Channel{}).Where("name = ?", "demo-fallback").
+		Update("health_status", "disabled").Error; err != nil {
+		t.Fatalf("模拟 14.3 真实状态: %v", err)
+	}
+	if err := Seed(db, opts); err != nil {
+		t.Fatalf("重启 Seed: %v", err)
+	}
+	var primary2, fallback2 Channel
+	if err := db.Where("name = ?", "demo-primary").First(&primary2).Error; err != nil {
+		t.Fatalf("查询 demo-primary: %v", err)
+	}
+	if primary2.HealthStatus != "unknown" {
+		t.Errorf("空串应自愈为 unknown，实际 %q", primary2.HealthStatus)
+	}
+	if err := db.Where("name = ?", "demo-fallback").First(&fallback2).Error; err != nil {
+		t.Fatalf("查询 demo-fallback: %v", err)
+	}
+	if fallback2.HealthStatus != "disabled" {
+		t.Errorf("14.3 的真实状态不应被覆盖，实际 %q", fallback2.HealthStatus)
 	}
 }
 
