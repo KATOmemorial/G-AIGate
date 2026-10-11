@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"context"
 	"log/slog"
 	"time"
 
@@ -10,7 +9,8 @@ import (
 
 // AccessLog 请求完成摘要中间件（10.2 §3 / 00 §8.3）：
 // 每请求完成打一行 msg="request_done"，字段全集为
-// ts, level（slog 自带）+ request_id, user_id, channel_id, model,
+// ts, level（日志器配置，ts 键由 main 的 newLogger 经 ReplaceAttr 改写）
+// + request_id, user_id, channel_id, model,
 // latency_ms, status_class, status_code, method, path。
 // 业务字段由后续模块通过 ctx 注入（context.go 的 With* 入口），
 // B2 阶段为零值占位。
@@ -26,8 +26,14 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 		defer func() {
 			ctx := c.Request.Context()
 			status := c.Writer.Status()
+			requestID, ok := RequestIDFromContext(ctx)
+			if !ok {
+				// 请求路径 request_id 缺失视为 bug（01 §4）：显式告警，不静默
+				logger.Warn("request_done 缺失 request_id（管道装配错误）",
+					"method", c.Request.Method, "path", c.Request.URL.Path)
+			}
 			logger.Info("request_done",
-				"request_id", mustRequestID(ctx),
+				"request_id", requestID,
 				"user_id", UserIDFromContext(ctx),
 				"channel_id", ChannelIDFromContext(ctx),
 				"model", ModelFromContext(ctx),
@@ -40,15 +46,6 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 		}()
 		c.Next()
 	}
-}
-
-// mustRequestID 取 request_id；AccessLog 位于 RequestID 之内，缺失即管道装配错误。
-func mustRequestID(ctx context.Context) string {
-	id, ok := RequestIDFromContext(ctx)
-	if !ok {
-		return ""
-	}
-	return id
 }
 
 // statusClass 归一化为 2xx/3xx/4xx/5xx（00 §8.3 status_class）。

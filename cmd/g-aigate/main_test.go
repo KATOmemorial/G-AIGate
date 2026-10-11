@@ -69,9 +69,7 @@ func TestShutdownWaitsInFlightAndClosesDepsReverse(t *testing.T) {
 	var buf bytes.Buffer
 	shutdownDone := make(chan struct{})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		shutdown(ctx, srv, deps, newTestLogger(&buf))
+		shutdown(2*time.Second, srv, deps, newTestLogger(&buf))
 		close(shutdownDone)
 	}()
 
@@ -81,6 +79,11 @@ func TestShutdownWaitsInFlightAndClosesDepsReverse(t *testing.T) {
 		t.Fatal("在途请求未完成时 shutdown 不应返回")
 	case <-time.After(150 * time.Millisecond):
 	}
+
+	// 10.2 §7 风险②：Shutdown 等待期间新连接立即被拒（非 bug，
+	// listener 已关闭），须有断言覆盖避免误判
+	_, err := http.Get(base)
+	require.Error(t, err, "Shutdown 等待期间新连接应立即失败")
 
 	// 放行在途请求 → shutdown 完成，请求正常收到响应（无截断）
 	close(release)
@@ -122,9 +125,7 @@ func TestShutdownTimeoutStillClosesDeps(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	shutdown(ctx, srv, deps, newTestLogger(&buf)) // 须在超时后返回
+	shutdown(50*time.Millisecond, srv, deps, newTestLogger(&buf)) // 须在超时后返回
 
 	// 依赖仍在 Shutdown 截断后按逆序关闭
 	assert.Equal(t, []string{"b", "a"}, order)
@@ -151,9 +152,7 @@ func TestShutdownDepCloseFailureIsolated(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	shutdown(ctx, srv, deps, newTestLogger(&buf))
+	shutdown(time.Second, srv, deps, newTestLogger(&buf))
 
 	// 失败不阻断逆序链
 	assert.Equal(t, []string{"meter-drain", "mysql"}, order)
@@ -165,4 +164,18 @@ func TestShutdownDepCloseFailureIsolated(t *testing.T) {
 	require.NotEmpty(t, lines)
 	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &lastLine))
 	assert.Equal(t, "g-aigate 已退出", lastLine["msg"])
+}
+
+// 评审阻断项①：newLogger 输出的时间键为 ts（00 §8.3），非 slog 默认 time。
+func TestNewLoggerTsKey(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newLogger(&buf, "info")
+	logger.Info("hello", "k", "v")
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &m))
+	assert.Contains(t, m, "ts")
+	assert.NotContains(t, m, "time")
+	assert.Equal(t, "hello", m["msg"])
+	assert.Equal(t, "INFO", m["level"])
 }

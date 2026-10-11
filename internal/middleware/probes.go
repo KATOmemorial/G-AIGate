@@ -26,6 +26,9 @@ type Probes struct {
 
 // Register 注册一个就绪检查项；check 返回非 nil error 即该项失败。
 // name 用于失败项列表定位（如 "mysql"、"redis"）。
+// 注意：注册器不设单项超时，挂起的 check 会拖住整个 /readyz
+// （check 收到请求 ctx，客户端断开即取消；K8s 探针自带超时）——
+// B2 末注册 MySQL/Redis ping 时 check 须自带超时。
 func (p *Probes) Register(name string, check func(ctx context.Context) error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

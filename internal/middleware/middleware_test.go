@@ -20,8 +20,17 @@ import (
 func init() { gin.SetMode(gin.TestMode) }
 
 // newCapturingLogger 输出到内存 buffer 的 slog JSON 日志器，供断言日志字段。
+// 时间键 ReplaceAttr 与 main 的 newLogger 一致（00 §8.3：ts 而非 slog
+// 默认的 time），保证测试断言的就是生产键名。
 func newCapturingLogger(buf *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(buf, nil))
+	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey && len(groups) == 0 {
+				a.Key = "ts"
+			}
+			return a
+		},
+	}))
 }
 
 // findLogEntry 找到第一条 msg 匹配的日志行并解析为 map；不存在则失败。
@@ -114,6 +123,9 @@ func TestPipelineOrderAccessLogContainsRequestID(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest("GET", "/ok", nil))
 	entry := findLogEntry(t, &buf, "request_done")
 	assert.Equal(t, w.Header().Get("X-Request-Id"), entry["request_id"])
+	// 00 §8.3：时间键为 ts（评审阻断项①补断言，防 slog 默认 time 回归）
+	assert.Contains(t, entry, "ts")
+	assert.NotContains(t, entry, "time")
 	assert.Equal(t, "GET", entry["method"])
 	assert.Equal(t, "/ok", entry["path"])
 	assert.EqualValues(t, 200, entry["status_code"])

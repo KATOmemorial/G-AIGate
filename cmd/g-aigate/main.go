@@ -6,11 +6,13 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -38,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := newLogger(cfg.Log.Level)
+	logger := newLogger(os.Stdout, cfg.Log.Level)
 	slog.SetDefault(logger)
 
 	gin.SetMode(gin.ReleaseMode)
@@ -79,21 +81,27 @@ func main() {
 		logger.Info("收到退出信号，开始优雅关闭", "signal", sig.String())
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
-	defer cancel()
-	shutdown(ctx, srv, deps, logger)
+	shutdown(cfg.Server.ShutdownTimeout, srv, deps, logger)
 }
 
 // shutdown 执行优雅关闭序列（10.2 §3）：先 Shutdown 停止接受新请求
-// 并等待在途请求（上限为 ctx 超时，流式长连接在此被截断——10-L1 §5
-// 已知取舍），再逆序关闭依赖。抽出为独立函数以便单测逆序与超时语义。
-func shutdown(ctx context.Context, srv *http.Server, deps []dependency, logger *slog.Logger) {
+// 并等待在途请求（上限 timeout，流式长连接在此被截断——10-L1 §5
+// 已知取舍），再逆序关闭依赖。依赖关闭阶段使用独立的全额超时预算：
+// Shutdown 超时耗尽后若复用同一 ctx，落账 drain（11.3）会拿到已取消
+// context 即刻失败，与"先 drain 再关 DB"（10.2 §4 决策②）冲突。
+// 抽出为独立函数以便单测逆序与超时语义。
+func shutdown(timeout time.Duration, srv *http.Server, deps []dependency, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("优雅关闭超时/出错，在途请求被截断", "err", err.Error())
 	}
-	// 逆序关闭：后装配的先关（落账 drain → redis → mysql）
+	// 逆序关闭：后装配的先关（落账 drain → redis → mysql）；
+	// 独立预算，不受 Shutdown 阶段是否超时影响
+	depCtx, depCancel := context.WithTimeout(context.Background(), timeout)
+	defer depCancel()
 	for i := len(deps) - 1; i >= 0; i-- {
-		if err := deps[i].close(ctx); err != nil {
+		if err := deps[i].close(depCtx); err != nil {
 			logger.Error("依赖关闭失败", "name", deps[i].name, "err", err.Error())
 		}
 	}
@@ -101,7 +109,8 @@ func shutdown(ctx context.Context, srv *http.Server, deps []dependency, logger *
 }
 
 // newLogger 按 config.log.level 构造结构化 JSON 日志器（00 §8.3 / 01 §4）。
-func newLogger(level string) *slog.Logger {
+// 00 §8.3 冻结的时间键为 ts（slog 默认为 time），经 ReplaceAttr 改写。
+func newLogger(w io.Writer, level string) *slog.Logger {
 	var lv slog.Level
 	switch level {
 	case "debug":
@@ -113,5 +122,13 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lv = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lv}))
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
+		Level: lv,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey && len(groups) == 0 {
+				a.Key = "ts"
+			}
+			return a
+		},
+	}))
 }
