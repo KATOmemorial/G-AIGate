@@ -7,6 +7,8 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
 
+  # jaeger 服务暂注释挂至 18.2（见 docker-compose.yml）；此数据源一并保留，
+  # 容器缺席时 Grafana 仅标记该源不可达（不影响启动），TODO(18.2) 恢复服务后即生效。
   - name: Jaeger
     type: jaeger
     access: proxy

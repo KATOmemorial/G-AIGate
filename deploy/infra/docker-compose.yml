@@ -5,7 +5,8 @@
 # 彻底重置:  docker compose down -v
 #
 # 端口分配（与 10.1 配置默认值一致）:
-#   MySQL 3306 | Redis 6379 | Prometheus 9090 | Grafana 3000 | Jaeger UI 16686 / OTLP 4317,4318
+#   MySQL 3306 | Redis 6379 | Prometheus 9090 | Grafana 3000
+#   （Jaeger UI 16686 / OTLP 4317,4318 暂缺：服务注释挂至 18.2，见下方 jaeger 段）
 # 网关本体（宿主机）: 业务 :8080 | 指标 :9101 | mock-provider :18080
 #
 # 注意: 本组仅限本机开发，未设 Redis 密码、MySQL 用开发口令，勿暴露公网。
