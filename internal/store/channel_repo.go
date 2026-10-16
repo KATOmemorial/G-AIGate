@@ -27,17 +27,26 @@ type ChannelRepo interface {
 
 // channelRepo 是 ChannelRepo 的 MySQL 实现（GORM）。
 type channelRepo struct {
-	db *gorm.DB
+	db    *gorm.DB
+	cache *ConfigCache
 }
 
-// NewChannelRepo 装配渠道访问层。db 为 11.1 Open 出的 GORM 客户端。
-func NewChannelRepo(db *gorm.DB) ChannelRepo {
-	return &channelRepo{db: db}
+// NewChannelRepo 装配渠道访问层。cache 为共享的配置读缓存（11-L1 §1）；
+// 读方法走缓存，写方法不回源缓存（失效由调用方经 Invalidator 触发）。
+func NewChannelRepo(db *gorm.DB, cache *ConfigCache) ChannelRepo {
+	return &channelRepo{db: db, cache: cache}
 }
 
-// ListActiveByModel 联表 channel_models 取 enabled 渠道，priority 降序
-// （同优先级按 id 升序，保证选择结果确定）。enabled 为 TINYINT，布尔绑定。
+// ListActiveByModel 走缓存（TTL 60s + singleflight）；未命中回源 listActiveByModel。
 func (r *channelRepo) ListActiveByModel(ctx context.Context, model string) ([]Channel, error) {
+	return getOrLoad(r.cache, ctx, channelCacheKey(model),
+		func(ctx context.Context) ([]Channel, error) { return r.listActiveByModel(ctx, model) },
+		cloneChannels)
+}
+
+// listActiveByModel 联表 channel_models 取 enabled 渠道，priority 降序
+// （同优先级按 id 升序，保证选择结果确定）。enabled 为 TINYINT，布尔绑定。
+func (r *channelRepo) listActiveByModel(ctx context.Context, model string) ([]Channel, error) {
 	var chs []Channel
 	err := r.db.WithContext(ctx).
 		Table("channels AS c").

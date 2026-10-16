@@ -22,6 +22,9 @@ func seededTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// testCache 是各用例独立的配置读缓存（60s TTL）。
+func testCache() *ConfigCache { return NewConfigCache(time.Minute) }
+
 // channelByID 按 name 查渠道（测试辅助，避免复用带主键的 struct，01 §3.1）。
 func channelByName(t *testing.T, db *gorm.DB, name string) Channel {
 	t.Helper()
@@ -33,7 +36,7 @@ func channelByName(t *testing.T, db *gorm.DB, name string) Channel {
 // §5 用例①：ListActiveByModel("gpt-4o-demo") 返回 2 条且 priority 降序
 func TestChannelRepo_ListActiveByModel(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 
 	chs, err := repo.ListActiveByModel(context.Background(), "gpt-4o-demo")
 	require.NoError(t, err)
@@ -52,7 +55,7 @@ func TestChannelRepo_ListActiveByModel(t *testing.T) {
 // 禁用渠道不从 ListActiveByModel 返回
 func TestChannelRepo_ListActiveByModel_ExcludesDisabled(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 	require.NoError(t, db.Model(&Channel{}).Where("name = ?", "demo-fallback").
 		Update("enabled", false).Error)
 
@@ -65,7 +68,7 @@ func TestChannelRepo_ListActiveByModel_ExcludesDisabled(t *testing.T) {
 // Get 命中 / 未命中
 func TestChannelRepo_Get(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 	primary := channelByName(t, db, "demo-primary")
 
 	got, err := repo.Get(context.Background(), int64(primary.ID))
@@ -80,7 +83,7 @@ func TestChannelRepo_Get(t *testing.T) {
 // ① 派生：Create 正路径——三表落库、health_status 显式置 unknown
 func TestChannelRepo_Create(t *testing.T) {
 	db := migratedTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 	ctx := context.Background()
 
 	ch := &Channel{Name: "new-chan", Provider: "openai", BaseURL: "http://127.0.0.1:9999",
@@ -116,7 +119,7 @@ func TestChannelRepo_Create(t *testing.T) {
 // §5 用例⑤：Create 事务——注入 channel_keys 插入失败 → 渠道行不存在（回滚）
 func TestChannelRepo_CreateRollback(t *testing.T) {
 	db := migratedTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 	ctx := context.Background()
 
 	ch := &Channel{Name: "tx-rollback", Provider: "openai", BaseURL: "http://x",
@@ -139,7 +142,7 @@ func TestChannelRepo_CreateRollback(t *testing.T) {
 // Update 正路径 + 未命中
 func TestChannelRepo_Update(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 	ctx := context.Background()
 	primary := channelByName(t, db, "demo-primary")
 
@@ -161,7 +164,7 @@ func TestChannelRepo_Update(t *testing.T) {
 // Update 无实际变更也应成功（MySQL changed-rows 语义不得误判为不存在）
 func TestChannelRepo_Update_NoOpIsOK(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 	primary := channelByName(t, db, "demo-primary")
 	require.NoError(t, repo.Update(context.Background(), &primary))
 }
@@ -169,7 +172,7 @@ func TestChannelRepo_Update_NoOpIsOK(t *testing.T) {
 // Delete 级联删除 Key 与映射；未命中返回 ErrNotFound
 func TestChannelRepo_Delete(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewChannelRepo(db)
+	repo := NewChannelRepo(db, testCache())
 	ctx := context.Background()
 	primary := channelByName(t, db, "demo-primary")
 
@@ -189,7 +192,7 @@ func TestChannelRepo_Delete(t *testing.T) {
 // §5 用例① 相关：ModelRepo.Resolve 命中 seed 别名
 func TestModelRepo_Resolve(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewModelRepo(db)
+	repo := NewModelRepo(db, testCache())
 	primary := channelByName(t, db, "demo-primary")
 
 	a, err := repo.Resolve(context.Background(), "gpt-4o-demo")
@@ -209,7 +212,8 @@ func TestModelRepo_Resolve(t *testing.T) {
 // ModelRepo CRUD
 func TestModelRepo_CRUD(t *testing.T) {
 	db := migratedTestDB(t)
-	repo := NewModelRepo(db)
+	cache := testCache()
+	repo := NewModelRepo(db, cache)
 	ctx := context.Background()
 
 	// Create 省略 strategy → 补齐 DDL 默认 weighted
@@ -231,6 +235,7 @@ func TestModelRepo_CRUD(t *testing.T) {
 	got.FallbackIDs = "[3,4]"
 	got.DefaultChannelID = nil
 	require.NoError(t, repo.Update(ctx, got))
+	cache.InvalidateAlias("alias-x") // 写方法不自动失效，由管理 API 调用 Invalidator（11.2 §3）
 	got2, err := repo.Resolve(ctx, "alias-x")
 	require.NoError(t, err)
 	// MySQL JSON 列会规范化文本（"[3,4]"→"[3, 4]"），故按解析后的 id 断言
@@ -242,6 +247,7 @@ func TestModelRepo_CRUD(t *testing.T) {
 
 	// Delete
 	require.NoError(t, repo.Delete(ctx, int64(a.ID)))
+	cache.InvalidateAlias("alias-x")
 	_, err = repo.Resolve(ctx, "alias-x")
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.ErrorIs(t, repo.Delete(ctx, int64(a.ID)), ErrNotFound)
@@ -259,7 +265,8 @@ func TestParseFallbackIDs(t *testing.T) {
 // §5 用例⑥：Effective 多条 effective_from 返回最新生效条；无价格 → ErrNoPrice
 func TestPriceRepo_Effective(t *testing.T) {
 	db := seededTestDB(t)
-	repo := NewPriceRepo(db)
+	cache := testCache()
+	repo := NewPriceRepo(db, cache)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -282,7 +289,9 @@ func TestPriceRepo_Effective(t *testing.T) {
 	assert.Equal(t, int64(300), got.InputPricePerM, "应取最新生效条")
 	assert.Equal(t, t2, got.EffectiveFrom.UTC())
 
-	// 历史时刻：at 落在 t1 与 t2 之间 → 只有 t1 生效
+	// 历史时刻：at 落在 t1 与 t2 之间 → 只有 t1 生效。
+	// 价格缓存按 model 单键（快照=回源时刻），历史 at 查询需先失效缓存再回源。
+	cache.InvalidateAll()
 	hist, err := repo.Effective(ctx, "tiered", t1.Add(30*time.Second))
 	require.NoError(t, err)
 	assert.Equal(t, int64(100), hist.InputPricePerM)

@@ -27,16 +27,24 @@ type ModelRepo interface {
 
 // modelRepo 是 ModelRepo 的 MySQL 实现。
 type modelRepo struct {
-	db *gorm.DB
+	db    *gorm.DB
+	cache *ConfigCache
 }
 
-// NewModelRepo 装配别名访问层。
-func NewModelRepo(db *gorm.DB) ModelRepo {
-	return &modelRepo{db: db}
+// NewModelRepo 装配别名访问层。cache 为共享的配置读缓存（11-L1 §1）。
+func NewModelRepo(db *gorm.DB, cache *ConfigCache) ModelRepo {
+	return &modelRepo{db: db, cache: cache}
 }
 
-// Resolve 按 uk_alias_name 唯一键点查别名。
+// Resolve 走缓存；未命中回源 resolveByName。
 func (r *modelRepo) Resolve(ctx context.Context, name string) (*ModelAlias, error) {
+	return getOrLoad(r.cache, ctx, aliasCacheKey(name),
+		func(ctx context.Context) (*ModelAlias, error) { return r.resolveByName(ctx, name) },
+		cloneAlias)
+}
+
+// resolveByName 按 uk_alias_name 唯一键点查别名。
+func (r *modelRepo) resolveByName(ctx context.Context, name string) (*ModelAlias, error) {
 	var a ModelAlias
 	if err := r.db.WithContext(ctx).Where("name = ?", name).First(&a).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
