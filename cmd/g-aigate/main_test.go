@@ -179,3 +179,33 @@ func TestNewLoggerTsKey(t *testing.T) {
 	assert.Equal(t, "hello", m["msg"])
 	assert.Equal(t, "INFO", m["level"])
 }
+
+// 11.3 §3 / 10.2 §4 决策②：装配顺序使落账 drain 先于 mysql 关闭。
+// 顺序反了则队列中未落库记录随 DB 关闭而丢失——这是关闭序列的兑现点。
+func TestBuildDepsUsageDrainClosesBeforeMySQL(t *testing.T) {
+	srv, _ := startTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	var mu sync.Mutex
+	var closed []string
+	rec := func(name string) func(context.Context) error {
+		return func(context.Context) error {
+			mu.Lock()
+			closed = append(closed, name)
+			mu.Unlock()
+			return nil
+		}
+	}
+	deps := buildDeps(rec("mysql"), rec("usage-repo"))
+
+	// 登记序：mysql 在前、usage-repo 在后（逆序关闭 → drain 先执行）
+	assert.Equal(t, []string{"mysql", "usage-repo"}, []string{deps[0].name, deps[1].name})
+
+	var buf bytes.Buffer
+	shutdown(time.Second, srv, deps, newTestLogger(&buf))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"usage-repo", "mysql"}, closed, "drain 必先于 mysql 关闭")
+}
