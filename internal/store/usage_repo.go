@@ -29,6 +29,9 @@ const (
 // usage_records 只追加、不提供 Update/Delete（11-L1 §3 决策②，账目不可变）。
 //
 // 消费方：17.1/17.2/17.3（meter）；Close 由 10.2 优雅关闭序列第一步调用。
+//
+// TODO(17.1): 构造 UsageRecord 时按 models.go 的字段类型（Estimated 为 int8 0/1），
+// 11.3 §3 的 Go 片段类型与 11.1 §9.7 冻结映射的一致性见 11.3 §9 实现记录① / 02 台账 #15。
 type UsageRepo interface {
 	// Record 入队一条 usage_records。永不阻塞、无返回值。队列满或已关闭时
 	// 丢弃该记录并调用 OnDrop。CreatedAt 为零值时按调用时刻（UTC）补齐。

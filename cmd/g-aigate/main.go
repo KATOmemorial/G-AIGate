@@ -144,6 +144,7 @@ func main() {
 // 队列中未落库记录丢失（10.2 §4 决策② / 11.3 §3）。
 // 11.4 redis 落地时须注册在 mysql 与 usage-repo 之间（非追加到末尾），
 // 以维持 10.2 §3.2 的关闭顺序 drain → redis → mysql。
+// TODO(11.4): redis 注册位置（见 02 台账 #16）。
 // 抽出为独立函数以便单测关闭顺序（同 10.2 §9 对 shutdown 的处置）。
 func buildDeps(mysqlClose, usageDrainClose func(context.Context) error) []dependency {
 	return []dependency{
