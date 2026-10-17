@@ -23,8 +23,8 @@ import (
 )
 
 // dependency 优雅关闭的依赖项（10.2 §3）：按装配顺序登记，关闭时
-// 逆序执行。后续按序追加：11.3 落账 drain → redis → mysql——
-// 落账队列必须先 drain 再关 DB，否则丢账（10.2 §4 决策②）。
+// 逆序执行（装配顺序见 buildDeps）。落账队列（11.3）必须先 drain
+// 再关 DB，否则丢账（10.2 §4 决策②）。
 type dependency struct {
 	name  string
 	close func(ctx context.Context) error
@@ -103,12 +103,16 @@ func main() {
 		return sqlDB.PingContext(ctx)
 	})
 
-	// 优雅关闭依赖列表：按装配顺序登记，逆序关闭。后续按序追加：
-	// 11.4 redis → 11.3 落账 drain（关闭顺序 drain → redis → mysql，
-	// 落账队列必须先 drain 再关 DB，否则丢账，10.2 §4 决策②）。
-	deps := []dependency{
-		{name: "mysql", close: func(ctx context.Context) error { return sqlDB.Close() }},
-	}
+	// 落账队列装配（11.3 §3）：Record 供 meter（17）经内存队列异步落库，
+	// 队列容量取 MeterConfig.SettleQueueSize（默认 1024）。worker 随装配启动；
+	// Close 由关闭序列第一步 drain（见 buildDeps）。
+	usageRepo := store.NewUsageRepo(db, cfg.Meter.SettleQueueSize)
+
+	// 优雅关闭依赖列表：按装配顺序登记，逆序关闭（10.2 §3）。
+	deps := buildDeps(
+		func(ctx context.Context) error { return sqlDB.Close() },
+		usageRepo.Close,
+	)
 
 	srv := &http.Server{Addr: cfg.Server.Addr, Handler: r}
 
@@ -132,6 +136,21 @@ func main() {
 	}
 
 	shutdown(cfg.Server.ShutdownTimeout, srv, deps, logger)
+}
+
+// buildDeps 按装配顺序登记优雅关闭依赖（10.2 §3：登记后逆序关闭）。
+// 顺序契约：mysql 先登记、落账 drain（usage-repo）后登记 → 关闭时
+// usage-repo 先于 mysql 执行，保证先 drain 落账队列再关 DB 连接，否则
+// 队列中未落库记录丢失（10.2 §4 决策② / 11.3 §3）。
+// 11.4 redis 落地时须注册在 mysql 与 usage-repo 之间（非追加到末尾），
+// 以维持 10.2 §3.2 的关闭顺序 drain → redis → mysql。
+// TODO(11.4): redis 注册位置（见 02 台账 #16）。
+// 抽出为独立函数以便单测关闭顺序（同 10.2 §9 对 shutdown 的处置）。
+func buildDeps(mysqlClose, usageDrainClose func(context.Context) error) []dependency {
+	return []dependency{
+		{name: "mysql", close: mysqlClose},
+		{name: "usage-repo", close: usageDrainClose},
+	}
 }
 
 // shutdown 执行优雅关闭序列（10.2 §3）：先 Shutdown 停止接受新请求
