@@ -137,6 +137,25 @@ func TestQuotaCounter_TTLHintFixedExpiry(t *testing.T) {
 	assert.Equal(t, 4*24*time.Hour+2*time.Hour+time.Hour, monthly.TTLHint()) // 9/26 22:00 → 10/1 00:00 = 4d2h, +1h
 }
 
+// §5 用例③ 边界（裁定 2026-10-19 / 文档 a1b831a）：到期 = "周期末 + 1h" 的绝对时刻，
+// 与首写时刻无关——深夜首写的 TTL 显著小于 25h（周期起点首写的最长情形）。
+func TestQuotaCounter_TTLHintLateDayShorterThanFullPeriod(t *testing.T) {
+	mr, client := newTestRedis(t)
+	// 23:00 首写：距周期末仅 1h，TTLHint = 1h + 1h = 2h，远小于 25h
+	freezeClock(t, time.Date(2026, 9, 26, 23, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	c := NewQuotaCounter(client)
+	k := QuotaKey{TargetType: "api_key", TargetID: 1, Period: PeriodDaily}
+
+	require.Equal(t, 2*time.Hour, k.TTLHint())
+	require.Less(t, k.TTLHint(), 25*time.Hour, "深夜首写 TTL 应显著小于周期起点首写的 25h")
+
+	// 机制性证据：真实写入后 miniredis 上的 TTL 确为 2h（而非整周期）
+	require.NoError(t, c.AddUsed(ctx, k, 1, 1))
+	assert.Equal(t, 2*time.Hour, mr.TTL(k.String()),
+		"到期为固定绝对时刻（周期末+1h），与首写时刻无关")
+}
+
 // §5 用例④：跨天 periodTag 变化 → 新 key，旧 key 仍在（等 TTL）。
 func TestQuotaCounter_PeriodRolloverNewKeyOldKeyRemains(t *testing.T) {
 	mr, client := newTestRedis(t)

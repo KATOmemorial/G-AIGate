@@ -180,9 +180,10 @@ func TestNewLoggerTsKey(t *testing.T) {
 	assert.Equal(t, "INFO", m["level"])
 }
 
-// 11.3 §3 / 10.2 §4 决策②：装配顺序使落账 drain 先于 mysql 关闭。
+// 11.3 §3 / 10.2 §3.2 / 台账 #16：装配序 mysql → redis → usage-repo，
+// 逆序关闭 drain(usage-repo) → redis → mysql（redis 夹在中间，非追加末尾）。
 // 顺序反了则队列中未落库记录随 DB 关闭而丢失——这是关闭序列的兑现点。
-func TestBuildDepsUsageDrainClosesBeforeMySQL(t *testing.T) {
+func TestBuildDepsCloseOrderDrainRedisMySQL(t *testing.T) {
 	srv, _ := startTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -197,15 +198,17 @@ func TestBuildDepsUsageDrainClosesBeforeMySQL(t *testing.T) {
 			return nil
 		}
 	}
-	deps := buildDeps(rec("mysql"), rec("usage-repo"))
+	deps := buildDeps(rec("mysql"), rec("redis"), rec("usage-repo"))
 
-	// 登记序：mysql 在前、usage-repo 在后（逆序关闭 → drain 先执行）
-	assert.Equal(t, []string{"mysql", "usage-repo"}, []string{deps[0].name, deps[1].name})
+	// 登记序（装配序）：mysql 在前、redis 居中、usage-repo 在后
+	assert.Equal(t, []string{"mysql", "redis", "usage-repo"},
+		[]string{deps[0].name, deps[1].name, deps[2].name})
 
 	var buf bytes.Buffer
 	shutdown(time.Second, srv, deps, newTestLogger(&buf))
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, []string{"usage-repo", "mysql"}, closed, "drain 必先于 mysql 关闭")
+	assert.Equal(t, []string{"usage-repo", "redis", "mysql"}, closed,
+		"关闭逆序：先 drain 落账，再关 redis，最后关 mysql")
 }
