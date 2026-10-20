@@ -190,11 +190,12 @@ func TestControlRejectsInvalidRequestsWithoutSet(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
 	for _, field := range []string{"chunks", "fail_after_chunks", "prompt_tokens", "completion_tokens", "chunk_interval", "ttfb_delay", "downtime_mode"} {
 		bad := []string{"null", "false", "[]", "{}"}
-		if field == "chunk_interval" || field == "ttfb_delay" {
+		switch field {
+		case "chunk_interval", "ttfb_delay":
 			bad = append(bad, "0", `""`, `"-1ns"`, `"bad"`, `"999999999999h"`)
-		} else if field == "downtime_mode" {
+		case "downtime_mode":
 			bad = append(bad, "0", `""`, `"reset"`)
-		} else {
+		default:
 			bad = append(bad, "-1", "1.5", "1.0", "1e0", `"1"`, strconv.FormatUint(uint64(maxInt)+1, 10))
 			if field == "chunks" {
 				bad = append(bad, "0")
@@ -374,7 +375,7 @@ func TestControlPUTKeepsInflightSnapshots(t *testing.T) {
 			var releaseOnce sync.Once
 			// Release before the server cleanup even on a failed assertion.
 			e := mock.NewEngine()
-			var engine mock.Engine = e
+			engine := e
 			var wrap func(http.Handler) http.Handler
 			if phase == "slow" {
 				engine = &gatedEngine{Engine: e, resolved: entered, release: release}
@@ -576,7 +577,9 @@ func TestControlConcurrentPUTGETAndChat(t *testing.T) {
 						return errors.New("missing completion choice")
 					}
 					content := completion.Choices[0].Message["content"]
-					if !((content == "mock-1 " && u == (wireUsage{11, 22, 33})) || (content == "mock-1 mock-2 " && u == (wireUsage{33, 44, 77}))) {
+					matchesA := content == "mock-1 " && u == (wireUsage{11, 22, 33})
+					matchesB := content == "mock-1 mock-2 " && u == (wireUsage{33, 44, 77})
+					if !matchesA && !matchesB {
 						return errors.New("chat read mixed configuration")
 					}
 				} else {
