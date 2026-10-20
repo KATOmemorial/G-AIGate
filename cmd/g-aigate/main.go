@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 
 	"gaigate/internal/config"
 	"gaigate/internal/middleware"
@@ -103,6 +104,14 @@ func main() {
 		return sqlDB.PingContext(ctx)
 	})
 
+	// Redis 客户端装配（11.4 §3）：跨节点共享状态原语（配额计数 / 健康状态 /
+	// 限流）的底座。连接惰性建立，就绪性由 readyz 的 ping 检查体现——沿用 10.2
+	// 决策①"readyz 动态注册"，不做启动期 fail-fast。
+	redisClient := store.NewRedis(store.RedisOptions{Addr: cfg.Redis.Addr, DB: cfg.Redis.DB})
+
+	// readyz 注册 Redis ping（同 mysql：check 自带超时，防挂起拖住 /readyz）
+	probes.Register("redis", redisReadinessCheck(redisClient))
+
 	// 落账队列装配（11.3 §3）：Record 供 meter（17）经内存队列异步落库，
 	// 队列容量取 MeterConfig.SettleQueueSize（默认 1024）。worker 随装配启动；
 	// Close 由关闭序列第一步 drain（见 buildDeps）。
@@ -111,6 +120,7 @@ func main() {
 	// 优雅关闭依赖列表：按装配顺序登记，逆序关闭（10.2 §3）。
 	deps := buildDeps(
 		func(ctx context.Context) error { return sqlDB.Close() },
+		func(ctx context.Context) error { return redisClient.Close() },
 		usageRepo.Close,
 	)
 
@@ -138,17 +148,26 @@ func main() {
 	shutdown(cfg.Server.ShutdownTimeout, srv, deps, logger)
 }
 
+// redisReadinessCheck 与 main 共用同一检查路径，预算为 2s；更早的请求 deadline 优先。
+func redisReadinessCheck(client *redis.Client) func(context.Context) error {
+	return func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return client.Ping(ctx).Err()
+	}
+}
+
 // buildDeps 按装配顺序登记优雅关闭依赖（10.2 §3：登记后逆序关闭）。
-// 顺序契约：mysql 先登记、落账 drain（usage-repo）后登记 → 关闭时
-// usage-repo 先于 mysql 执行，保证先 drain 落账队列再关 DB 连接，否则
-// 队列中未落库记录丢失（10.2 §4 决策② / 11.3 §3）。
-// 11.4 redis 落地时须注册在 mysql 与 usage-repo 之间（非追加到末尾），
-// 以维持 10.2 §3.2 的关闭顺序 drain → redis → mysql。
-// TODO(11.4): redis 注册位置（见 02 台账 #16）。
+// 顺序契约（台账 #16）：登记序为 mysql → redis → usage-repo，关闭时逆序
+// 执行 usage-repo(drain) → redis → mysql，保证先 drain 落账队列、再关 Redis、
+// 最后关 DB 连接，否则队列中未落库记录丢失（10.2 §3.2 / 11.3 §3）。
+// 11.4 已按此落位（原 TODO(11.4) 消解；redis 注册在 mysql 与 usage-repo 之间，
+// 非追加到末尾）。
 // 抽出为独立函数以便单测关闭顺序（同 10.2 §9 对 shutdown 的处置）。
-func buildDeps(mysqlClose, usageDrainClose func(context.Context) error) []dependency {
+func buildDeps(mysqlClose, redisClose, usageDrainClose func(context.Context) error) []dependency {
 	return []dependency{
 		{name: "mysql", close: mysqlClose},
+		{name: "redis", close: redisClose},
 		{name: "usage-repo", close: usageDrainClose},
 	}
 }
