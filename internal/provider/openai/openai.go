@@ -58,9 +58,16 @@ func (a *adapter) Chat(ctx context.Context, ep *provider.Endpoint, req *provider
 	return &provider.ChatResponse{Body: body, Usage: usage}, usage, nil
 }
 
-// TODO(13.2): M2 implements SSE parsing, bounded worker and waiting Close.
-func (*adapter) ChatStream(context.Context, *provider.Endpoint, *provider.ChatRequest) (provider.Stream, error) {
-	return nil, errors.New("openai: ChatStream is not implemented in M1 (13.2 M2 pending)")
+// ChatStream returns after validated response headers. The owned worker waits
+// for data using the same context; this layer does not create a TTFB budget.
+func (a *adapter) ChatStream(ctx context.Context, ep *provider.Endpoint, req *provider.ChatRequest) (provider.Stream, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	resp, err := a.request(streamCtx, ep, req, true)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return newStream(streamCtx, cancel, resp.Body, a.streamBuffer), nil
 }
 
 // request transfers ownership of a successful response body to its caller.
