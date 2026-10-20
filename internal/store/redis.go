@@ -14,12 +14,13 @@ type RedisOptions struct {
 }
 
 // NewRedis 构造 go-redis v9 客户端（11.4 §2；01-工程规范 §1 基线）。
-// 连接惰性建立：启动阶段由 main（10.2 readyz 注册）用 Ping 做 fail-fast 校验，
-// 不在此处阻塞。
+// 连接惰性建立，就绪性由 main 注册的 readyz Ping 表达；启动连通性 fail-fast
+// 留给 20.1（台账 #20）。网络读写遵守调用 context 的 deadline，包括 readyz 的预算。
 func NewRedis(opts RedisOptions) *redis.Client {
 	return redis.NewClient(&redis.Options{
-		Addr: opts.Addr,
-		DB:   opts.DB,
+		Addr:                  opts.Addr,
+		DB:                    opts.DB,
+		ContextTimeoutEnabled: true,
 	})
 }
 

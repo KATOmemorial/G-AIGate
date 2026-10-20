@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 
 	"gaigate/internal/config"
 	"gaigate/internal/middleware"
@@ -109,11 +110,7 @@ func main() {
 	redisClient := store.NewRedis(store.RedisOptions{Addr: cfg.Redis.Addr, DB: cfg.Redis.DB})
 
 	// readyz 注册 Redis ping（同 mysql：check 自带超时，防挂起拖住 /readyz）
-	probes.Register("redis", func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		return redisClient.Ping(ctx).Err()
-	})
+	probes.Register("redis", redisReadinessCheck(redisClient))
 
 	// 落账队列装配（11.3 §3）：Record 供 meter（17）经内存队列异步落库，
 	// 队列容量取 MeterConfig.SettleQueueSize（默认 1024）。worker 随装配启动；
@@ -149,6 +146,15 @@ func main() {
 	}
 
 	shutdown(cfg.Server.ShutdownTimeout, srv, deps, logger)
+}
+
+// redisReadinessCheck 与 main 共用同一检查路径，预算为 2s；更早的请求 deadline 优先。
+func redisReadinessCheck(client *redis.Client) func(context.Context) error {
+	return func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return client.Ping(ctx).Err()
+	}
 }
 
 // buildDeps 按装配顺序登记优雅关闭依赖（10.2 §3：登记后逆序关闭）。
