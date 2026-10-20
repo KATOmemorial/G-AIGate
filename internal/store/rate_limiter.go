@@ -14,6 +14,7 @@ const rateLimitKeyPrefix = "gaigate:rl:"
 
 // RateLimiter 是固定窗口限流计数的原子原语（11.4 §3：预留接口 + 实现）。
 // 只做计数与窗口判定，不承载业务判定语义（scope/id/limit 由消费方给定）。
+// 启用策略（哪些 scope、阈值、开关）未定、当前无消费方——移交项见 02 台账 #19。
 type RateLimiter interface {
 	// Allow 计数一次并判定：当前窗口内计数 <= limit → true；超出 → false。
 	// 窗口自首次计数起算，到期后计数自动清零（靠 key 过期，无需清理任务）。
