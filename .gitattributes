@@ -1,0 +1,4 @@
+# Preserve executable/sourceable Bash syntax in Windows checkouts.
+test/e2e/lib/mock_control.sh text eol=lf
+test/e2e/mock_scenarios.sh text eol=lf
+test/e2e/mock_scripts_test.sh text eol=lf
