@@ -74,6 +74,68 @@ func TestHealthzAndRouterLogs(t *testing.T) {
 	assert.Equal(t, resp.Header.Get("X-Request-Id"), record["request_id"])
 }
 
+// Exercise the actual entrypoint assembly over HTTP: control, chat and healthz
+// must share one Engine, and adding control must not swallow injected aborts.
+func TestControlRoutesShareEntrypointEngine(t *testing.T) {
+	e := mock.NewEngine()
+	s := httptest.NewServer(newHandler(e, mock.NewLogger(io.Discard)))
+	defer s.Close()
+	s.Client().Timeout = 3 * time.Second
+	for _, scenario := range []string{"downtime", "interrupted", "normal"} {
+		body := `{"key":"sk-entrypoint-test","scenario":"` + scenario + `","params":{"chunk_interval":"0s"}}`
+		r, err := http.NewRequestWithContext(t.Context(), http.MethodPut, s.URL+"/admin/scenario", strings.NewReader(body))
+		require.NoError(t, err)
+		r.Header.Set("Content-Type", "application/json")
+		resp, err := s.Client().Do(r)
+		require.NoError(t, err)
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		require.NoError(t, err)
+		require.Equal(t, 200, resp.StatusCode, "%s", data)
+		assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+		assert.NotContains(t, string(data), "sk-entrypoint-test")
+		stored, _ := e.Get("sk-entrypoint-test")
+		assert.Equal(t, mock.Scenario(scenario), stored)
+		r, err = http.NewRequestWithContext(t.Context(), http.MethodPost, s.URL+"/v1/chat/completions", strings.NewReader(`{"model":"entrypoint","messages":[{}],"stream":true,"stream_options":{"include_usage":true}}`))
+		require.NoError(t, err)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer sk-entrypoint-test")
+		resp, err = s.Client().Do(r)
+		require.NoError(t, err)
+		data, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		switch scenario {
+		case "downtime":
+			require.NoError(t, err)
+			assert.Equal(t, 503, resp.StatusCode)
+			assert.Contains(t, string(data), "mock_unavailable")
+		case "interrupted":
+			require.Error(t, err, "abort must remain an abnormal transport end")
+			assert.Equal(t, 200, resp.StatusCode)
+			assert.Equal(t, 3, bytes.Count(data, []byte("data: ")))
+			assert.NotContains(t, string(data), "[DONE]")
+			assert.NotContains(t, string(data), "prompt_tokens")
+		case "normal":
+			require.NoError(t, err)
+			assert.Equal(t, 200, resp.StatusCode)
+			assert.Equal(t, 10, bytes.Count(data, []byte("data: ")))
+			assert.Contains(t, string(data), "[DONE]")
+		}
+	}
+	resp, err := s.Client().Get(s.URL + "/admin/scenarios")
+	require.NoError(t, err)
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Contains(t, string(data), `"scenario":"normal"`)
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	resp, err = s.Client().Get(s.URL + "/healthz")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, 200, resp.StatusCode)
+}
+
 type closeObservedListener struct {
 	net.Listener
 	closed chan struct{}
