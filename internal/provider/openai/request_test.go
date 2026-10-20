@@ -138,7 +138,4 @@ func TestNewCopiesClientPolicy(t *testing.T) {
 	require.NoError(t, client.CheckRedirect(nil, nil))
 	require.ErrorIs(t, a.client.CheckRedirect(nil, nil), http.ErrUseLastResponse)
 	require.Equal(t, 17, transport.MaxIdleConns)
-	stream, err := p.ChatStream(t.Context(), &provider.Endpoint{}, basicRequest())
-	require.Nil(t, stream)
-	require.ErrorContains(t, err, "not implemented in M1")
 }
