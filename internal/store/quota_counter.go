@@ -44,16 +44,16 @@ type QuotaKey struct {
 // periodTag 按 UTC 推导（11.4 §7 决策，避免时区漂移）：daily → "2006-01-02"，
 // monthly → "2006-01"。周期切换即换 key，旧 key 靠 TTL 自然过期（11.4 §4 决策①）。
 func (k QuotaKey) String() string {
-	return fmt.Sprintf("%s%s:%d:%s", quotaKeyPrefix, k.TargetType, k.TargetID, k.periodTag())
+	return k.stringAt(nowUTC())
 }
 
-// periodTag 按当天（UTC）推导周期分片标签。
-func (k QuotaKey) periodTag() string {
-	now := nowUTC()
+// stringAt 与 ttlHintAt 接收同一 UTC 快照，避免单次操作跨周期时 key 和到期时间错配。
+func (k QuotaKey) stringAt(now time.Time) string {
+	format := "2006-01-02" // daily（默认；消费方 17.2 只传 daily|monthly）
 	if k.Period == PeriodMonthly {
-		return now.Format("2006-01")
+		format = "2006-01"
 	}
-	return now.Format("2006-01-02") // daily（默认；消费方 17.2 只传 daily|monthly）
+	return fmt.Sprintf("%s%s:%d:%s", quotaKeyPrefix, k.TargetType, k.TargetID, now.Format(format))
 }
 
 // TTLHint 返回计数 key 首次写入时应设的 TTL：周期末尾 + 1h 缓冲（11.4 §3）。
@@ -63,7 +63,10 @@ func (k QuotaKey) periodTag() string {
 // 语义为"到期落在固定绝对时刻（周期末 + 1h）"，与首次写入时刻无关——同一周期内
 // 任意时刻首写，过期时刻一致。重复写入不重置（见 AddUsed 的 Lua 契约）。
 func (k QuotaKey) TTLHint() time.Duration {
-	now := nowUTC()
+	return k.ttlHintAt(nowUTC())
+}
+
+func (k QuotaKey) ttlHintAt(now time.Time) time.Duration {
 	var periodEnd time.Time
 	if k.Period == PeriodMonthly {
 		periodEnd = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
@@ -90,21 +93,51 @@ type quotaCounter struct{ client *redis.Client }
 func NewQuotaCounter(client *redis.Client) QuotaCounter { return &quotaCounter{client: client} }
 
 // quotaAddScript 原子完成"HINCRBY tokens + HINCRBY cost + 仅首次设 EXPIRE"。
-// TTL 返回 -1 表示 key 存在但无过期（HINCRBY 后 key 必存在），此时才设 TTL——
+// 写入前 TTL 返回 -1（永久 key）或 -2（不存在）时才设 TTL——
 // 故重复调用不重置 TTL（§5 用例③）。字段名由 Go 侧常量拼入，保证单一来源。
+// Lua 命令错误不会自动回滚：后续命令失败时显式恢复已写字段，原先缺失的字段删除。
+// 快照与恢复均用 Redis 原始字符串，不将 int64 计数转换为 Lua number（避免精度丢失）。
+// 使用 Lua 内置 pcall 捕获 redis.call：锁定的 miniredis 对 redis.pcall 的错误返回不兼容。
 var quotaAddScript = redis.NewScript(fmt.Sprintf(`
-redis.call('HINCRBY', KEYS[1], '%s', ARGV[1])
-redis.call('HINCRBY', KEYS[1], '%s', ARGV[2])
-if redis.call('TTL', KEYS[1]) < 0 then
-  redis.call('EXPIRE', KEYS[1], ARGV[3])
+local tokensField = '%s'
+local costField = '%s'
+local before = redis.call('HMGET', KEYS[1], tokensField, costField)
+local ttl = redis.call('TTL', KEYS[1])
+local function restore(field, value)
+  if value then
+    redis.call('HSET', KEYS[1], field, value)
+  else
+    redis.call('HDEL', KEYS[1], field)
+  end
+end
+local function errorReply(err)
+  if type(err) == 'table' then
+    return err
+  end
+  return redis.error_reply(tostring(err))
+end
+redis.call('HINCRBY', KEYS[1], tokensField, ARGV[1])
+local costOK, costResult = pcall(redis.call, 'HINCRBY', KEYS[1], costField, ARGV[2])
+if not costOK then
+  restore(tokensField, before[1])
+  return errorReply(costResult)
+end
+if ttl < 0 then
+  local expiryOK, expiryResult = pcall(redis.call, 'EXPIRE', KEYS[1], ARGV[3])
+  if not expiryOK then
+    restore(tokensField, before[1])
+    restore(costField, before[2])
+    return errorReply(expiryResult)
+  end
 end
 return 1
 `, quotaFieldTokens, quotaFieldCost))
 
 // AddUsed 见 QuotaCounter。
 func (c *quotaCounter) AddUsed(ctx context.Context, k QuotaKey, tokens, costMicro int64) error {
-	key := k.String()
-	ttlSec := int64(k.TTLHint() / time.Second)
+	now := nowUTC()
+	key := k.stringAt(now)
+	ttlSec := int64(k.ttlHintAt(now) / time.Second)
 	if err := quotaAddScript.Run(ctx, c.client, []string{key},
 		tokens, costMicro, ttlSec).Err(); err != nil {
 		return fmt.Errorf("store: 配额计数累加 %s: %w", key, err)
