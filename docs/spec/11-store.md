@@ -1,6 +1,6 @@
 # 11-store（L1）
 
-> 状态：B1 评审中 | 层：第 0 层基座 | 批次：B2
+> 状态：B2 已交付；§7 的 B3 仓储增量待用户 review（2026-10-20） | 层：第 0 层基座 | 批次：B2
 > 上游：[00-总纲](00-总纲.md) §6.3 / §7 | 工程基线：[01-工程规范](01-工程规范.md)
 
 ---
@@ -31,7 +31,7 @@
 - **11.1 MySQL schema 与迁移**：全部 DDL、索引、seed 数据（admin 用户、指向 mock 的示例渠道、示例价格）。
 - **11.2 渠道/Key/别名/价格访问层**（含 cache-aside 缓存与主动失效）。
 - **11.3 计量/配额/账单访问层**（含异步落账队列）。
-- **11.4 Redis 状态原语**（miniredis 单测；限流计数仅预留接口）。
+- **11.4 Redis 状态原语**（已交付；含 RateLimiter 实现，但业务启用策略仍按台账 #19 后置）。
 
 ## 5. 主要风险
 
@@ -42,3 +42,9 @@
 ## 6. 验收要点
 
 B2 检查点贡献：`docker compose up mysql redis` 后 `go test ./internal/store/...` 全绿；seed 后 `ListActiveByModel("gpt-4o-demo")` 返回示例渠道。
+
+## 7. B3 仓储增量（2026-10-20，候选待 review）
+
+00 v0.9 §6.3 登记：13.1 交付 users／api_keys 仓储（不是渠道 KeyRepo），13.3 为 ModelRepo 增加 List、为 ChannelRepo 增加 GetModel。代码仍在 store，业务／HTTP 不直接拼 SQL；不改表、迁移、既有方法语义或缓存失效策略。新增读取均先不缓存，避免 List 的失效范围和 mapping 的缓存归属不明确；既有 Resolve／ListActiveByModel 沿原缓存。
+
+13.3 的 bootstrap 在 B3 临时承担端点组装与 secret 解密，B4／B5 由 14.2／16.4 接管；store 仍只返回密文，不把解密放仓储。02 #9 模型列表部分已折入候选，渠道列表等剩余部分仍属 14.1；#11／#12 维持原管理归属。完整新签名见 13.1／13.3，不追认这些是 11.2 已交付方法。

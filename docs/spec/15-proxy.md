@@ -1,47 +1,60 @@
 # 15-proxy（L1）
 
-> 状态：B1 评审中 | 层：第 1 层数据面 | 批次：B3
-> 上游：[00-总纲](00-总纲.md) §3.2 / §5.2 | 工程基线：[01-工程规范](01-工程规范.md)
-> 流式是地基而非收尾（00 §11 v0.1 决策④）——本模块与 access 同批交付。
-
----
+> 状态：B3 修订候选，待用户 review（2026-10-20；尚未实现） | 层：第 1 层数据面 | 批次：B3
+> 上游：[00-总纲](00-总纲.md) v0.9 候选 §3.2／§5.2／§6.1／§6.9 | 工程基线：[01-工程规范](01-工程规范.md)
 
 ## 1. 模块边界
 
-**做什么**：SSE 流式转发机制（透传、Flush 时机、响应头管理）；背压（客户端慢时不无限缓冲）；取消传播（客户端断开 → 取消上游请求）；双超时（首字节与整体分离）；非流式缓冲路径。
+负责一次上游尝试的 SSE／JSON 转发、提交状态、同步计量回调、资源关闭、背压、取消和双超时。只依赖 provider 类型，不知道 Principal、候选链、渠道选择或账务策略。
 
-**不做什么**：候选迭代与切换决策（16.4——本模块只报告"这次转发结果如何"，不决定"要不要换渠道"）；计量累计（17——通过分片回调把数据交出去）。
+proxy 调用注入的 opener，才能在发起上游请求前建立同一预算；这是执行一次请求的传输机制，不是选择渠道或执行重试。调用方提供已经选定 Endpoint 的闭包。
 
-## 2. 接口（模块内核心类型，15.1 冻结签名）
+## 2. 接口与责任
+
+完整类型见 [15.1 §3](15-proxy/15.1-sse-forward.md)：
 
 ```go
-// ForwardResult 的结果分类是 16.4 切换决策的输入（契约级语义）
-// Success / TTFBTimeout（未写响应头，可切换）/ StreamInterrupted（已写出，不可切换）
-// OverallTimeout（已写出，不可切换）/ ClientCanceled
-
+type StreamOpener func(context.Context) (provider.Stream, error)
+type ResponseOpener func(context.Context) (*provider.ChatResponse, *provider.Usage, error)
 type Forwarder interface {
-    Forward(ctx context.Context, w http.ResponseWriter, s provider.Stream,
-        opts ForwardOptions, onChunk func(ev provider.StreamEvent)) (ForwardResult, error)
+    Forward(context.Context, http.ResponseWriter, StreamOpener,
+        ForwardOptions, func(provider.StreamEvent)) (ForwardResult, error)
+    ForwardNonStream(context.Context, http.ResponseWriter, ResponseOpener,
+        ForwardOptions) (ForwardResult, error)
 }
 ```
 
-## 3. 关键设计决策
+ForwardResult.WroteHeader 记录实际提交边界；它是上层能否再写 JSON／考虑候选切换的必要条件。false 不等于一定重试，客户端取消、不可重试上游错误仍不能盲目换渠道。任何结果类别都可能在提交前发生，不以类别猜测提交状态。
 
-1. **逐 chunk write + flush，不聚合**：低延迟优先。背压链条是本模块的面试核心题：客户端消费慢 → `w.Write` 阻塞 → 有界 channel（64 chunk）写满 → 停止从上游读取 → 上游 socket 发送缓冲堆积 → TCP 窗口收缩 → 上游暂停发送。全链无无限缓冲。
-2. **取消传播**：`r.Context().Done()`（客户端断开）→ `stream.Close()`（13.2 的 Provider 层取消上游 HTTP 请求）→ goroutine 收敛，无泄漏。验收用 mock 侧连接日志验证。
-3. **双超时语义**：TTFB 超时（默认 10s）发生在写响应头**之前**，是可切换信号；整体超时（默认 300s）只保证资源回收，此时响应头已写出，不可切换——这条边界是 00 §3.2.1 的实现者。
-4. **非流式路径复用同一管道**：`stream=false` 时缓冲全部 chunk 后一次性写出，错误映射与流式一致。
+proxy 关闭上游并返回错误；HTTP handler 决定未提交时写错误、已提交时 ErrAbortHandler 异常终止。proxy 自身不 recover／panic，不向流内塞错误帧。13.3 对接外层 Recover。
 
-## 4. L2 清单（与 00 §4.1 预排一致，无调整）
+## 3. 关键候选决策
 
-- **15.1 SSE 流式透传与非流式路径**：头管理（`Content-Type: text/event-stream`、禁用压缩与缓冲）、Flush、`ForwardResult` 分类、非流式缓冲。
-- **15.2 背压 / 取消传播 / 双超时**：有界缓冲、取消链、两种超时计时器。
+1. **应用层 data 保真**：适配器给出 Raw data，proxy 按 SSE 规则重建 data 行和空行；不把 Chunk 解析再序列化。HTTP 分块、换行风格、注释等不保证逐字节相同。Done 显式转发一次；内容／usage／Done 分别计数，Chunks 不包含后两者。
+2. **同一尝试预算**：进入 Forward／ForwardNonStream，在 opener 前计时。TTFB 覆盖建连、响应头及首个合法可转发 data（非流式为完整 JSON）；首个有效载荷就绪后停 TTFB。Overall 含慢客户端 Write／Flush 和正常清理。FirstByteMs 是应用层可转发时刻，未出现为 -1，不是客户端收到时间。
+3. **有界链条**：适配器 worker → 固定容量 channel → 同步转发写出；慢写让 channel 写满，停止继续解析上游。不能用每帧启动 goroutine 或无界队列绕开反压。
+4. **阻塞写必须退出**：在 commit 前确认底层 writer 的错误 Flush／写 deadline 能力；Overall 写期限和取消后的主动打断覆盖正在阻塞的 Write／Flush。所有 watcher 与 worker 有唯一 owner 并等待退出。生产链不支持能力时，在未提交状态报错，不能静默声称有保证。
+5. **非流式直接 Chat**：完整 JSON 有界读取并一次转发，不用 SSE 缓冲伪造非流式。缺 usage 可由未来 meter 估算；错误 JSON、空响应或超限不提交成功头。
 
-## 5. 主要风险
+## 4. L2 清单与边界
 
-- 中间件包装 `ResponseWriter` 导致 `http.Flusher` 断言失败——提供包装器透传 Flusher，验收覆盖。
-- 极慢客户端长期占用连接：整体超时 300s 兜底，连接数指标（18）监控。
+- [15.1 SSE 与非流式转发](15-proxy/15.1-sse-forward.md)：opener 接口、内容／usage／Done、提交标记、错误分类、Write／短写／Flush 停止、关闭与同步回调。继承父 context 取消；双预算和阻塞写完整保证在 15.2。
+- [15.2 背压／取消／双超时](15-proxy/15.2-backpressure-cancel-timeout.md)：不更改 15.1 对外签名，补齐 opener 前预算、底层 deadline、worker／watcher 收敛及真实慢读者验证。
 
-## 6. 验收要点
+15.1 单独验收不代表 15 模块完整交付；13.3 集成必须等待 15.2。配置沿用 ProxyConfig：TTFBTimeout=10s、OverallTimeout=300s、StreamBuffer=64；channel 容量在 13.2 构造时注入，不另造重复配置。
 
-B3 检查点贡献：`curl -N` 流式逐行可见；客户端 Ctrl+C 后 mock 日志显示上游连接被关闭（取消传播生效）；mock `slow` 场景 TTFB 超时触发且未向客户端写出任何字节（可切换路径成立）。
+## 5. 风险与验证边界
+
+B3 以本机 HTTP/1.1 实测；不承诺未经验证的 HTTP/2／TLS／反向代理端到端时序。Gin 声称实现 Flusher 不足以证明底层支持错误 Flush／写期限，需要真实装配链验证。只取消 context 不能打断阻塞写，测试必须包含真实 TCP 不读响应的客户端。
+
+关闭预算需区分取消信号发出与 worker 已退出；用进入屏障、退出通道及 WaitGroup／errgroup 证明，不比较脆弱的全局 goroutine 数。时间用宽容区间，失败时输出具体阶段。
+
+## 6. 验收贡献
+
+正常 8+1+1；缺 Done 的异常流失败；已提交后保留已发送帧而真实异常终止；慢响应头在 TTFB 内退出且未提交；客户端取消后上游收到取消并收敛；慢读者背压有界、Overall 可打断 Write。下游处理错误时仍能写一次正确 JSON，不能把“proxy 未提交”写成“最终客户端零字节”。
+
+## 7. 文档决策记录
+
+| 日期 | 责任与状态 | 修订 |
+|---|---|---|
+| 2026-10-20 | 主会话，待用户 review | 以 00 v0.9 补齐 opener 前统一预算、Done／Error 原因、非流式直接 Chat、真实提交状态、阻塞 Write／Flush 退出及入口异常中止分工；纠正旧稿 Overall 必已提交及两段计时的假设。未实现／未验收 |

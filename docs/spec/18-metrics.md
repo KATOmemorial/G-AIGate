@@ -46,3 +46,9 @@
 ## 6. 验收要点
 
 B7 前置：`/metrics` 文本可查全部指标；一次容灾请求的 trace 能看到两次 `upstream.attempt`。B7 贡献：Grafana 面板出图（20.3）。
+
+## 7. B3 观测输入（2026-10-20，候选待 review）
+
+15.1／15.2 的 FirstByteMs 从一次尝试进入起算，覆盖连接、响应头和首个完整可转发载荷；非流式为完整 JSON 就绪。它是应用层口径，未就绪为 -1，不是 TCP 首字节或客户端接收时刻；18.1 不得再加一次 ChatStream 耗时或把 -1 写入成功延迟样本。正式命名／指标说明在 18.1 冻结，不改本轮之外的 label 契约。
+
+ForwardResult 的结果类别不能替代 HTTP 提交状态：HTTP 200 可伴随后续中断，需独立的失败／中断观测；WroteHeader=false 也不保证应当切换。移交记录见 02，B3 不提前实现 Prometheus／OTel。

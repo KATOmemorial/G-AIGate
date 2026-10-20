@@ -1,54 +1,72 @@
 # 13-access（L1）
 
-> 状态：B1 评审中 | 层：第 1 层数据面 | 批次：B3
-> 上游：[00-总纲](00-总纲.md) §6.1 / §6.2 / §3.1 | 工程基线：[01-工程规范](01-工程规范.md)
-
----
+> 状态：B3 修订候选，待用户 review（2026-10-20；尚未实现） | 层：第 1 层数据面 | 批次：B3
+> 上游：[00-总纲](00-总纲.md) v0.9 候选 §5.2／§6／§8／§9 | 工程基线：[01-工程规范](01-工程规范.md)
+> 本文及所属四份 L2 只作为 review 稿；用户批准后统一冻结，不能据草案开工。
 
 ## 1. 模块边界
 
-**做什么**：APIKey 鉴权（Bearer → Principal）；共享内核 `internal/provider` 的类型冻结与 OpenAI 适配器；`/v1/chat/completions` 与 `/v1/models` 接入 handler；用户 Key 管理 API（`/api/v1/user/keys`）。
+负责用户 API Key 鉴权、共享 Provider 类型及 OpenAI HTTP 适配器、两个 /v1 端点、本人 Key 生命周期及首次创建命令。模型与请求结构只做网关必需的校验，未知正文内容保留；不承担真实配额、路由策略、健康、容灾或计量结算。
 
-**不做什么**：配额判断（17）；候选选择与容灾（16）；流转发机制（15）。`/v1` handler 只做编排：auth → precheck → route → execute（见 §3.4）。
+共享内核 `internal/provider` 只放类型／接口／分类错误；HTTP 实现在子包 `internal/provider/openai`。access 不 import router、meter、proxy；它定义消费方接口，由 cmd 注入实现。B3 临时编排归 `internal/bootstrap`，不是 access 的业务路由器。
 
-**L2 调整**：相对 00 §4.1 预排增加 **13.4（用户 Key 管理 API）**。理由：Key 的创建/吊销/列表属 access 域（鉴权与 Key 生命周期是一体的），原 3 个 L2 装不下，且该 API 是 19.1 用户控制台的直接数据源。
+## 2. HTTP 与 Go 边界
 
-## 2. 接口
+| 入口 | 身份与输出 |
+|---|---|
+| POST /v1/chat/completions | Bearer → Principal → 请求校验 → Precheck → ChatExecutor；流式 SSE 或非流式 JSON |
+| GET /v1/models | 同一 Bearer；返回 `{"object":"list","data":[...]}`，列全部已配置别名 |
+| GET／POST／DELETE /api/v1/user/keys[/:id] | B3 复用 Bearer 本人身份；19.1 后换为会话身份，业务服务只信标准 context 中的 Principal |
+| cmd/g-aigate-key | 本地运维创建入口，显式用户名；仅成功时向 stdout 返回一次创建 JSON，不启动网关、不走 seed |
 
-- 跨模块契约：00 §6.1（共享内核，字段级在 13.2 冻结）、§6.2（`Authenticator` / `Principal`）。
-- HTTP：`POST /v1/chat/completions`、`GET /v1/models`（返回启用别名列表）、`/api/v1/user/keys` CRUD。
+Authenticator／Principal／Provider 的权威签名在 00 §6.1／§6.2。access 的 ChatExecutor 接收请求而非 router.Plan；B5 需要装配适配器，不能声称与 router.Executor 签名相同。详见 13.3 §3。
 
-## 3. 关键设计决策
+## 3. 核心候选决策
 
-1. **Key 指纹方案**：生成 `sk-` + 32B 随机；库中存 SHA-256 hash + 前 8 位前缀作索引列。鉴权 = 前缀定位候选行 + hash 比对。明文仅创建时返回一次（01 §8）。
-2. **OpenAI 适配器近透传**：网关 → 上游的请求体走字段白名单透传，**流式时强制注入 `stream_options.include_usage=true`**——metering 依赖末 chunk 的 usage；非流式响应原生带 usage。不透传的字段（如自造扩展头）一律丢弃，保持 OpenAI 兼容承诺。
-3. **`/v1/models` 首版只列启用别名**，不做按用户过滤（配额维度后置）——控制首版复杂度。
+1. **用户 Key 的完整闭环**：32 随机字节编码为无 padding 的 base64url，前置 sk-；raw 总长 46，前缀取完整 raw 的前 8 字节（含 sk-），SHA-256 hex 存库。前缀索引非唯一，碰撞后恒时比较完整摘要。无鉴权缓存，吊销提交后的新鉴权即失效；已放行的在途请求不撤销。
+2. **请求保留结构**：messages 使用原始 JSON 对象列表，不把 content 收窄成 string；其余顶层字段进 Extra。适配器只重写 model、stream 和流式 include_usage，不原地修改传入请求。工具调用和多模态内容可透传，但 B3 不承诺其计量估算或对任意厂商兼容。
+3. **终止必须显式**：SSE Chunk／UsageDone／Done／Error 区分；Done 对应一次 [DONE]。没有 Done 的 channel 关闭不是成功；usage 不是结束信号。Error 保留原因，响应已提交后入口异常终止真实 HTTP，避免正常 EOF 伪装成功。
+4. **M0 与正式路由分期**：B3 仅直连最高优先级渠道的第一把启用 Key，无回退。precheck 是明确 AllowAll 桩；B5／B6 替换归属及验收登记台账，不能宣称已交付容灾或配额。
+5. **不引入 HTTP 用户身份桩**：首次 Key 用本地命令创建；Key 管理 API 由有效 Bearer 标识本人。19.1 后接入会话／CSRF，不让请求参数或任意 header 指定 user_id。
 
-## 4. 错误映射表（13.3 冻结，面试高频题）
+## 4. 错误与提交边界
 
-| 来源 | 网关响应 | 理由 |
+| 情况 | 响应未提交时 |
+|---|---|
+| 缺失／非法 Bearer、Key 不存在／hash 不符 | 401 gaigate_unauthorized |
+| Key 吊销／过期、用户禁用 | 403 gaigate_key_revoked／gaigate_key_expired／gaigate_user_disabled |
+| JSON／字段非法、正文超限、媒体类型不符 | 400 gaigate_invalid_request／413 gaigate_request_too_large／415 gaigate_unsupported_media_type |
+| 别名不存在、无可用候选 | 404 gaigate_model_not_found／503 gaigate_no_candidate |
+| store／装配内部故障 | 500 gaigate_internal，不伪装为 401 |
+| 配额硬超限（未来消费者） | 429 gaigate_quota_exceeded + Retry-After: 60，后续 17.2 裁定精确等待值 |
+| 上游 401／403 | 502 gaigate_upstream_auth_failed |
+| 上游 429／5xx／网络／协议失败 | 502 gaigate_upstream_error；B3 不重试，B5 按策略消化 |
+| 网关 TTFB／Overall 超时 | 502 gaigate_upstream_timeout |
+| 上游 400／404／422 | 安全且完整的 OpenAI error 对象保留状态及 error 字段，补 request_id；不满足条件退回 502 |
+
+已提交后不追加错误正文、不补 Done、不换渠道；入口以 http.ErrAbortHandler 中止，外层 Recover 必须透传该哨兵。客户端取消不再写错误。错误对象安全条件、错误体上限及敏感内容处理见 13.3，完整错误体与凭据不进日志。
+
+## 5. L2 清单与施工顺序
+
+| L2 | 交付 | 依赖／停点 |
 |---|---|---|
-| 无 Key / Key 格式错 | 401 `gaigate_unauthorized` | |
-| Key 不存在 / hash 不符 | 401 `gaigate_unauthorized` | 不区分"不存在"与"错误"，防枚举 |
-| Key 吊销 / 过期 | 403 `gaigate_key_revoked` / `gaigate_key_expired` | |
-| 配额硬超限 | 429 `gaigate_quota_exceeded` + Retry-After | 17.2 返回 |
-| 无可用候选 | 503 `gaigate_no_candidate` | 16 返回 |
-| 上游 401/403 | **502** `gaigate_upstream_auth_failed` | 不透传 401——避免客户端误判是自己的 Key 问题 |
-| 上游 429/5xx/超时 | 由 16.4 容灾消化；全部候选失败后 502 | 见 16-L1 |
-| 流式中断 | 已写出部分保留，连接关闭，计该渠道失败 | 00 §3.2.1 |
+| [13.1](13-access/13.1-auth-middleware.md) | 鉴权、身份 context、Key 生成、用户／Key 仓储、共用错误响应工具 | B2 已验收；M1 仓储与生成，M2 鉴权与中间件 |
+| [13.2](13-access/13.2-provider-openai.md) | 共享类型、独立适配器、SSE 终止与有界 worker | 可在 13.1 后施工；M1 请求／非流式，M2 流与关闭 |
+| [15.1](15-proxy/15.1-sse-forward.md)／[15.2](15-proxy/15.2-backpressure-cancel-timeout.md) | 转发、预算、慢写取消及机制测试 | 13.2 后依次交付 |
+| [13.4](13-access/13.4-user-keys-api.md) | 本人 Key API、本地创建命令 | 只依赖 13.1；安排在 M0 集成前 |
+| [13.3](13-access/13.3-v1-endpoints.md) | 接入、bootstrap、装配及完整 M0 | 以上全部验收合并后施工 |
 
-## 5. L2 清单
+相对 00 旧预排，13.4 已在旧 L1 拆出，本轮补齐 00 批次登记。先完成底层机制与首次签发，再做 13.3 的可运行集成，避免循环依赖和无凭据的“演示”。
 
-- **13.1 鉴权中间件**：前缀查找 + hash 比对 + Principal 注入 ctx；单测覆盖上表前四行。
-- **13.2 Provider 抽象与 OpenAI 适配器**：冻结 `ChatRequest/ChatResponse/StreamEvent` 字段清单；SSE 解析（`data:` 行、`[DONE]`、usage 提取）；`include_usage` 注入。
-- **13.3 /v1 接入层**：handler 编排 + 错误映射表落地 + `GET /v1/models`。
-- **13.4 用户 Key 管理 API**：创建（返回明文一次）/列表/吊销，供 19.1 复用。
+## 6. 风险与验收
 
-## 6. 主要风险
+- 强制 include_usage 不做静默重试／降级；不支持的上游按失败报告，17.1 只在成功响应缺 usage 时估算。
+- /v1/models 是配置发现，不保证当前健康、余额或请求一定成功；不添加 enabled 列或用户模型权限。
+- 固定 10 MiB 入口正文上限由 13.3 实施；Gin multipart 内存配置不能替代请求体限制。
+- B3 必须有正常 SSE 8 内容 + 1 usage + 1 Done、非流式、无 Key／吊销、真实断流、建连／响应头超时、取消与背压证据；限定测试、race、全仓真实 MySQL 回归与 lint 通过。未知字段用 httptest 捕获请求，不修改 12 的服务或旧脚本。
 
-- 强制注入 `include_usage` 可能被个别严格上游拒绝——白名单透传策略下这是唯一注入字段，文档化；遇到不支持上游时回退估算（17.1 已有该路径）。
-- Key 前缀 8 字符 base62 的碰撞只影响候选行数（hash 最终裁决），无正确性风险。
+## 7. 文档决策记录
 
-## 7. 验收要点
-
-B3 检查点贡献：无 Key 401；坏 Key 401；吊销 Key 403；正常 Key 经网关打到 mock 流式返回。
+| 日期 | 责任与状态 | 修订 |
+|---|---|---|
+| 2026-10-20 | 主会话，待用户 review | 对齐 00 v0.9：消除白名单与 Extra 的矛盾、保留 messages 结构；补齐 Done／错误／Close；明确内核与适配器分包、bootstrap 单向装配、仓储增量、Key 首次创建与会话接缝；九段 L2 与顺序同步。未写实现，未宣称 B3 验收 |

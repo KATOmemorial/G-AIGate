@@ -28,7 +28,7 @@
 2. **熔断全状态在 Redis，单点真相**：记录（ZADD）+ 窗口裁剪 + 统计 + 状态转移在一个 Lua 脚本内原子完成。多副本共享同一窗口，天然一致——"熔断器放进程内存"在本架构下是错误答案（每副本只见部分流量），这是必考点的标准答案。
 3. **half-open 并发控制**：多副本同时到达 half-open，Lua 内 CAS 只放行一个探测请求，其余按 open 处理。
 4. **候选处理顺序**：先过滤（禁用 + 熔断）再按策略排序；执行器对每个候选在**尝试时点**再次 `Allow()`（计划与执行之间状态可能变化）。
-5. **执行器语义**（16.4 冻结）：逐候选尝试 `ChatStream` → TTFB 前失败（含 TTFB 超时）→ `OnResult + ReportRequestResult` → 下一候选；写出成功后中断 → 计失败、不切换（00 §3.2.1）；每次尝试独立 span 与打点；结束后触发 17 的结算。
+5. **执行器语义**（16.4 冻结；B3 接缝修订待 review）：逐候选把捕获 Endpoint 的 opener 交给 proxy，由 proxy 在发起 ChatStream／Chat 前开始该次预算。失败时分别上报熔断／健康；仅实际未提交且错误可重试、客户端仍有效时考虑下一候选。已提交后中断不切换；每次尝试独立 span／打点，结束触发 17 结算。完整候选边界见下节。
 
 ## 4. L2 清单（与 00 §4.1 预排一致，无调整）
 
@@ -46,3 +46,9 @@
 ## 6. 验收要点
 
 B5 检查点（全模块，项目最重的一场）：mock 双渠道编排 `normal` + `downtime` → 请求成功且自动落在好渠道；主渠道切 `rate_limited` → 熔断打开 → 切换备渠道 → 客户端无感知 → 主渠道恢复 → 30s 后半开探测成功 → 熔断闭合 → 流量回归。脚本入库 `test/e2e/failover.sh`；`go test -race ./internal/router/...` 全绿。
+
+## 7. B3 消费接缝（2026-10-20，候选待 review）
+
+00 §6.5 的 router.Executor 仍接收 Plan；access.ChatExecutor 仅是入口需求，不能声称同签名。B5 由装配适配器先 Route 后 Execute，并移除 B3 bootstrap 的直连选择。Forwarder 接受 opener，而非先建立 Stream 再传入；TTFB 单段覆盖连接／响应头／首个可转发结果，FirstByteMs 不再加 ChatStream 耗时。WroteHeader 只排除已提交切换，不代表 false 就该重试；客户端取消及不可重试上游状态仍单独判断。
+
+结果类别新增 upstream_error／write_error，参见 15.1，不能假设 OverallTimeout 必已写头。用 middleware.WithChannelID 同步本请求摘要，在候选切换后完成日志能反映最终实际渠道；不要回写全局或跨请求共享 context。临时路径接管与观测口径登记 02，正式 L2 撰写时消费。

@@ -1,0 +1,46 @@
+# B3 施工文档 review 清单
+
+> 主会话整理：2026-10-20。状态：候选待 review；不是 B3 开工或验收结论。
+> 已批准基线：提交 `18c2adc` 的 00 v0.8 与既有工程规范；B2 已关闭。当前工作区新增的是 00 v0.9／01 v0.4 及 B3 修订候选。
+
+## 1. 本轮交付与阅读顺序
+
+1. [00-总纲](../spec/00-总纲.md)：优先看页首状态、§5.2／§6.1～§6.3／§6.7／§6.9／§8.2／§9／§11。
+2. [01-工程规范](../spec/01-工程规范.md)：目录、共享测试库串行策略、用户 Key 创建输出例外；[02-台账](../spec/02-遗留事项台账.md) #9 的部分消费与新增 #21～#26。
+3. [13-access L1](../spec/13-access.md)／[15-proxy L1](../spec/15-proxy.md)：职责和施工顺序。
+4. 六份 L2：[13.1 鉴权](../spec/13-access/13.1-auth-middleware.md)、[13.2 Provider](../spec/13-access/13.2-provider-openai.md)、[15.1 转发](../spec/15-proxy/15.1-sse-forward.md)、[15.2 预算与背压](../spec/15-proxy/15.2-backpressure-cancel-timeout.md)、[13.4 Key 生命周期](../spec/13-access/13.4-user-keys-api.md)、[13.3 接入与 M0](../spec/13-access/13.3-v1-endpoints.md)。六份均补齐九段，§10 为本轮决策记录，未来实现验收追加 §11。
+5. 受影响的消费说明：10-L1 §7／10.2 §10、11-L1 §7、16／17／18／19-L1 §7；其余原模块设计不在本轮重写范围。
+
+本文是导航，权威要求只在 00／01 及对应 L1／L2；review 发现分歧以修改权威正文解决，不把本清单发展成第二份契约。
+
+## 2. 需要重点判断的候选决策
+
+| 决策 | 具体内容 | 要排除的缺口 |
+|---|---|---|
+| SSE 终止闭环 | Chunk／UsageDone／Done／Error；Done 显式输出一次，Error 携原因，Close 等 worker | parser 吃掉 Done、EOF 被当成功、关闭时满队列死锁 |
+| 预算起点 | Forward 接收 opener，从调用上游之前起算，流式等合法 data，非流式等完整 JSON；Overall 含慢写 | 漏建连／响应头耗时、两段重复计时、只取消 context 却无法打断 Write |
+| 提交与中止 | WroteHeader 按真实提交；失败后不补错误帧／Done；13.3 让 Recover 透传 ErrAbortHandler | 正常 return 伪装完整 HTTP、错误 JSON 混入 SSE、按结果类别猜已写头 |
+| 分包与适配 | core 只类型，HTTP 在 provider/openai；临时编排在 bootstrap；ChatExecutor 通过装配适配 Plan 执行器 | access↔router import 环、谎称接口签名一致、B3 提前实现 B5 |
+| Key 生命周期 | raw 为 sk-+32字节base64url、含 sk- 共8字节前缀；owner 条件吊销；本地命令首签，HTTP 用 Bearer 本人身份 | 前缀长度冲突、空更新误判、不存在的 seed 用户 Key、任意指定用户的身份桩 |
+| 请求与资源上限 | messages 原始 JSON、Extra 保留；chat 10MiB／SSE event 1MiB／非流响应10MiB／错误体1024字节；Key元数据64KiB | 静默丢工具／多模态字段、单帧无界、截断错误体被当完整透传 |
+| 日志与测试隔离 | 请求内共享摘要回传实际渠道；多 SQL 包共用 gaigate_test 时 -p 1，进程 fixture 只用测试库 | 派生 context 无法更新外层日志、并行 DROP 测试库、污染业务库或共享 mock 场景 |
+
+B3 的计量只预留回调，真实配额／落账／健康／容灾／登录会话仍未交付；台账移交不能自动关闭。
+
+## 3. review 的证据与完成条件
+
+本轮只改文档，不实现接口，不以当前代码尚无 B3 类型为缺陷。应核对现有 schema、repo、config、middleware、mock 的真实交付是否足以支撑施工；新增要求必须有明确 owner、签名、参数语义、可执行验收和未来接管项。特别检查正常／断流／取消／慢写各方的资源 owner 与 HTTP 提交边界。
+
+输出具体阻断矛盾、位置、跨模块影响与最小修订建议；无实质问题则给出“可冻结”的文档结论。不能将文档 review 说成代码独立审查通过，也不要为偏好要求换技术栈、添加未来功能或改旧回归脚本。
+
+按 [01 §9](../spec/01-工程规范.md)：“主会话的文档决策由用户 review”，本轮保持候选，待用户确认后主会话统一登记冻结并编写 13.1 开发 prompt。主会话不写代码、不代合并或 push。
+
+## 4. 可交给独立文档审查对话的 prompt
+
+```text
+你是 G-AIGate 的 B3 施工文档审查会话，负责独立找出会阻碍按图施工的契约、归属、依赖和验收缺口。先读 docs/reviews/B3-施工文档-review清单.md，再按其顺序阅读 00、01、02、13／15 L1 与六份 L2，以及受影响的消费说明；对照当前 main 的 schema、repo、config、middleware、mock 实现。不要把尚未实施的候选接口当成代码 bug，也不要拿旧草案覆盖当前候选正文。
+
+重点检查：Done／Error／Close 的完整链路；opener 前统一预算与阻塞写退出；WroteHeader 与 Recover 异常中止；分包和正式执行器适配能否避免循环依赖；Key 首次创建与 owner 隔离；messages／Extra 保留；字段和资源上限；共享测试库与真实进程验证可行性；未来替换是否有台账归属。
+
+只读文档与必要源码，不修改任何文件，不写实现，不启动会改数据的测试，不提交、切分支、合并或 push。报告按严重程度列出实质问题，引用文件／章节，说明触发条件、影响与最小修订建议；区分阻断、建议、未来模块项。没有实质问题时明确给“可冻结”结论。本轮是文档审查，不是 B3 代码验收；最终冻结由用户确认后主会话登记。
+```
