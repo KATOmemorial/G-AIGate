@@ -3,7 +3,6 @@
 package mock
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -123,15 +122,21 @@ func (e *engine) Snapshot() map[string]ScenarioConfig {
 	return copy
 }
 
+// invalidConfigError labels existing validation failures within this package.
+// Engine still returns ordinary wrapped errors; its interface and semantics stay unchanged.
+type invalidConfigError string
+
+func (err invalidConfigError) Error() string { return string(err) }
+
 // validateKey is shared with the HTTP Bearer parser. Reject rather than normalize;
 // errors deliberately contain neither key bytes nor other request data.
 func validateKey(key string) error {
 	if key == "" {
-		return errors.New("test key must be nonempty")
+		return invalidConfigError("test key must be nonempty")
 	}
 	for _, r := range key {
 		if unicode.IsSpace(r) || unicode.IsControl(r) {
-			return errors.New("test key must not contain whitespace or control characters")
+			return invalidConfigError("test key must not contain whitespace or control characters")
 		}
 	}
 	return nil
@@ -141,29 +146,29 @@ func validateScenario(s Scenario, p ScenarioParams) error {
 	switch s {
 	case Normal, Slow, Downtime, RateLimited, Interrupted:
 	default:
-		return errors.New("unknown scenario")
+		return invalidConfigError("unknown scenario")
 	}
 	switch {
 	case p.Chunks <= 0:
-		return errors.New("chunks must be positive")
+		return invalidConfigError("chunks must be positive")
 	case p.ChunkInterval < 0:
-		return errors.New("chunk_interval must be nonnegative")
+		return invalidConfigError("chunk_interval must be nonnegative")
 	case p.TTFBDelay < 0:
-		return errors.New("ttfb_delay must be nonnegative")
+		return invalidConfigError("ttfb_delay must be nonnegative")
 	case p.DowntimeMode != "503" && p.DowntimeMode != "refuse":
-		return errors.New("downtime_mode must be 503 or refuse")
+		return invalidConfigError("downtime_mode must be 503 or refuse")
 	case p.FailAfterChunks < 0:
-		return errors.New("fail_after_chunks must be nonnegative")
+		return invalidConfigError("fail_after_chunks must be nonnegative")
 	case s == Interrupted && (p.FailAfterChunks < 1 || p.FailAfterChunks >= p.Chunks):
-		return errors.New("interrupted requires 1 <= fail_after_chunks < chunks")
+		return invalidConfigError("interrupted requires 1 <= fail_after_chunks < chunks")
 	case p.PromptTokens < 0:
-		return errors.New("prompt_tokens must be nonnegative")
+		return invalidConfigError("prompt_tokens must be nonnegative")
 	case p.CompletionTokens < 0:
-		return errors.New("completion_tokens must be nonnegative")
+		return invalidConfigError("completion_tokens must be nonnegative")
 	}
 	const maxInt = int(^uint(0) >> 1)
 	if p.PromptTokens > maxInt-p.CompletionTokens {
-		return errors.New("total_tokens exceeds Go int range")
+		return invalidConfigError("total_tokens exceeds Go int range")
 	}
 	return nil
 }

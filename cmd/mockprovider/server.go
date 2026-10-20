@@ -52,6 +52,7 @@ func newHandler(e mock.Engine, logger *slog.Logger) http.Handler {
 	r := gin.New()
 	r.Use(mock.RequestLog(logger)) // No recovery middleware: abort reaches net/http.
 	mock.RegisterChatRoutes(r, e)
+	mock.RegisterControlRoutes(r, e)
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
@@ -68,7 +69,7 @@ func run(ctx context.Context, rawAddr string, logger *slog.Logger) error {
 		return fmt.Errorf("listen on MOCK_ADDR: %w", err)
 	}
 	gin.SetMode(gin.ReleaseMode)
-	// Exactly one Engine; 12.2 can register its control routes on this same value.
+	// Exactly one Engine shared by the chat and control routes.
 	return serve(ctx, listener, newHandler(mock.NewEngine(), logger), logger)
 }
 

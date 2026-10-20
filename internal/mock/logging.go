@@ -48,7 +48,11 @@ func RequestLog(logger *slog.Logger) gin.HandlerFunc {
 			} else if c.Request.Context().Err() != nil {
 				outcome = "canceled"
 			}
-			logger.Info("request_done",
+			level := slog.LevelInfo
+			if c.Writer.Status() >= 500 {
+				level = slog.LevelError
+			}
+			logger.Log(c.Request.Context(), level, "request_done",
 				"request_id", id, "model", model, "scenario", string(scenario),
 				"chunks_written", chunks, "outcome", outcome,
 				"latency_ms", time.Since(started).Milliseconds(),
