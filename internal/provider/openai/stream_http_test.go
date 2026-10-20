@@ -1,13 +1,16 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +22,81 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+func TestStreamReadErrorTextIsSafeAndCausePreserved(t *testing.T) {
+	const key = "sk-review-regression-secret"
+	cause := &url.Error{
+		Op: "read", URL: "https://user:private-password@upstream.test/path?key=" + key,
+		Err: errors.New("sensitive read failure: " + key),
+	}
+	body := &observedBody{reader: io.MultiReader(strings.NewReader("data: {}\n\n"), failingReader{cause})}
+	ep := endpoint("http://upstream.test")
+	ep.APIKey = key
+	stream, err := withBody(t, 200, "text/event-stream", body).ChatStream(t.Context(), ep, basicRequest())
+	require.NoError(t, err)
+	defer func() { _ = stream.Close() }()
+	events := collect(stream)
+	require.Len(t, events, 2)
+	require.Equal(t, provider.Chunk, events[0].Kind)
+	require.Equal(t, provider.Error, events[1].Kind)
+	streamErr := events[1].Err
+	require.ErrorIs(t, streamErr, provider.ErrStreamInterrupted)
+	require.ErrorIs(t, streamErr, cause)
+	var original *url.Error
+	require.ErrorAs(t, streamErr, &original)
+	require.Same(t, cause, original)
+	var log bytes.Buffer
+	slog.New(slog.NewJSONHandler(&log, nil)).Error("upstream failure", "error", streamErr)
+	for _, text := range []string{streamErr.Error(), fmt.Sprint(streamErr), log.String()} {
+		for _, sensitive := range []string{key, "private-password", "https://", "upstream.test", "sensitive read failure"} {
+			require.NotContains(t, text, sensitive)
+		}
+	}
+	require.NoError(t, stream.Close())
+	require.Equal(t, 1, body.closes)
+}
+
+func TestEscapedV1RootOverHTTP(t *testing.T) {
+	for _, tc := range []struct{ base, escaped, decoded string }{
+		{"/%76%31", "/%76%31/chat/completions", "/v1/chat/completions"},
+		{"/v%31/", "/v%31/chat/completions", "/v1/chat/completions"},
+		{"/prefix/%761///", "/prefix/%761/chat/completions", "/prefix/v1/chat/completions"},
+		{"/pre%2Ffix/%76%31/", "/pre%2Ffix/%76%31/chat/completions", "/pre/fix/v1/chat/completions"},
+	} {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.base, streaming), func(t *testing.T) {
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, tc.escaped, r.URL.EscapedPath())
+					if r.URL.Path != tc.decoded {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					if streaming {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "data: [DONE]\n\n")
+					} else {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, "{}")
+					}
+				}))
+				defer s.Close()
+				p := newAdapter(t, s.Client())
+				if streaming {
+					stream, err := p.ChatStream(t.Context(), endpoint(s.URL+tc.base), basicRequest())
+					require.NoError(t, err)
+					defer func() { _ = stream.Close() }()
+					events := collect(stream)
+					require.Len(t, events, 1)
+					require.Equal(t, provider.Done, events[0].Kind)
+				} else {
+					response, _, err := p.Chat(t.Context(), endpoint(s.URL+tc.base), basicRequest())
+					require.NoError(t, err)
+					require.Equal(t, "{}", string(response.Body))
+				}
+			})
+		}
+	}
+}
 
 func TestChatStreamWirePreservesRequestAndInput(t *testing.T) {
 	for _, options := range []string{"missing", "null", `{"include_usage":false,"other":{"a":[1,2]}}`} {

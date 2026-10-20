@@ -2,7 +2,6 @@ package openai
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"sync"
 
@@ -10,6 +9,16 @@ import (
 
 	"golang.org/x/sync/errgroup"
 )
+
+// The cause may contain credentials or upstream payload fragments. Keep the
+// public text fixed; classification may still traverse both underlying errors.
+type streamInterruptedError struct{ cause error }
+
+func (*streamInterruptedError) Error() string { return "openai: upstream stream interrupted" }
+
+func (e *streamInterruptedError) Unwrap() []error {
+	return []error{provider.ErrStreamInterrupted, e.cause}
+}
 
 type eventStream struct {
 	ctx    context.Context
@@ -70,7 +79,7 @@ func (s *eventStream) run() error {
 		}
 		if err != nil {
 			event = provider.StreamEvent{Kind: provider.Error,
-				Err: fmt.Errorf("%w: %w", provider.ErrStreamInterrupted, err)}
+				Err: &streamInterruptedError{cause: err}}
 		}
 		if !s.send(event) || event.Kind == provider.Done || event.Kind == provider.Error {
 			return nil

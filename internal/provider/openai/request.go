@@ -22,9 +22,10 @@ func completionURL(base string) (string, error) {
 			return "", errors.New("openai: invalid endpoint port")
 		}
 	}
-	// Append to the escaped path to preserve encoded separators in prefixes.
+	// Identify the API root using decoded path semantics, while appending to the
+	// escaped path so encoded prefixes (including encoded separators) survive.
 	prefix := strings.TrimRight(u.EscapedPath(), "/")
-	if !strings.HasSuffix(prefix, "/v1") {
+	if !strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/v1") {
 		prefix += "/v1"
 	}
 	u.RawPath = prefix + "/chat/completions"
