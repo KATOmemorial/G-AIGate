@@ -18,6 +18,7 @@ const rateLimitKeyPrefix = "gaigate:rl:"
 type RateLimiter interface {
 	// Allow 计数一次并判定：当前窗口内计数 <= limit → true；超出 → false。
 	// 窗口自首次计数起算，到期后计数自动清零（靠 key 过期，无需清理任务）。
+	// window 必须至少 1ms 且为整毫秒；非法时先返回 false, 参数错误，不访问 Redis。
 	Allow(ctx context.Context, scope string, id string, limit int, window time.Duration) (bool, error)
 }
 
@@ -44,6 +45,9 @@ func rateLimitKey(scope, id string, window time.Duration) string {
 // Allow 见 RateLimiter。
 func (r *rateLimiter) Allow(ctx context.Context, scope, id string, limit int,
 	window time.Duration) (bool, error) {
+	if window < time.Millisecond || window%time.Millisecond != 0 {
+		return false, fmt.Errorf("store: 限流 window=%s 无效：必须至少 1ms 且为整毫秒", window)
+	}
 	key := rateLimitKey(scope, id, window)
 	n, err := rateLimitScript.Run(ctx, r.client, []string{key}, window.Milliseconds()).Int64()
 	if err != nil {
