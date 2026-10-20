@@ -82,6 +82,7 @@ func RegisterChatRoutes(r gin.IRoutes, e Engine) {
 			},
 			outcome: "error",
 		}
+		c.Set(chatRunKey, &run)
 		run.serve(c, e)
 	})
 }
