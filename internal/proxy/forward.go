@@ -24,7 +24,14 @@ func (e *forwardError) Error() string   { return e.message }
 func (e *forwardError) Unwrap() []error { return e.causes }
 
 func failure(message string, causes ...error) error {
-	return &forwardError{message: message, causes: causes}
+	// Unwrap() []error must never contain nil entries (errors package contract).
+	filtered := make([]error, 0, len(causes))
+	for _, cause := range causes {
+		if cause != nil {
+			filtered = append(filtered, cause)
+		}
+	}
+	return &forwardError{message: message, causes: filtered}
 }
 
 func nilValue(value any) bool {
@@ -81,23 +88,22 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 		result.Kind = kind
 		return result, cause
 	}
+	life := newLifetime(ctx, started, opts)
+	defer life.finish(&result, &err)
 	flush, err := errorFlusher(w)
 	if err != nil {
 		return result, err
 	}
-	// TODO(15.2): Add the opener-inclusive TTFB/Overall budgets and interruptible
-	// Write/Flush deadlines. This lifecycle currently inherits parent cancellation.
-	attempt, cancel := context.WithCancel(ctx)
+	downstream, err := newDownstream(w)
+	if err != nil {
+		return result, err
+	}
 	var stream provider.Stream
 	defer func() {
-		cancel()
+		life.closeUpstream()
 		var closeErr error
 		if !nilValue(stream) {
 			closeErr = stream.Close() // Sole owner: Close waits for the producer.
-		}
-		if kind, cause := canceled(ctx); cause != nil {
-			result.Kind = kind
-			err = failure("proxy: request context ended", cause, err)
 		}
 		if closeErr != nil {
 			if err == nil {
@@ -107,11 +113,21 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 				err = failure("proxy: forwarding failed; upstream cleanup also failed", err, closeErr)
 			}
 		}
+		if cleanupErr := downstream.finish(life); cleanupErr != nil {
+			if err == nil {
+				result.Kind = ResultWriteError
+			}
+			err = failure("proxy: downstream cleanup failed", err, cleanupErr)
+		}
 	}()
-	stream, err = open(attempt)
-	if kind, cause := canceled(ctx); cause != nil {
+	if kind, cause := life.check(); cause != nil {
 		result.Kind = kind
 		return result, cause
+	}
+	stream, err = open(life.upstream)
+	if kind, cause := life.check(); cause != nil {
+		result.Kind = kind
+		return result, failure("proxy: opening ended after cancellation", cause, err)
 	}
 	if err != nil {
 		return result, failure("proxy: upstream opening failed", err)
@@ -121,20 +137,20 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 	}
 	events := stream.Events()
 	for {
-		if kind, cause := canceled(ctx); cause != nil {
+		if kind, cause := life.check(); cause != nil {
 			result.Kind = kind
 			return result, cause
 		}
 		var event provider.StreamEvent
 		var ok bool
 		select {
-		case <-attempt.Done():
-			result.Kind, err = canceled(ctx)
+		case <-life.ctx.Done():
+			result.Kind, err = life.check()
 			return result, err
 		case event, ok = <-events:
 		}
 		// Do not let select choose a queued event over an already canceled parent.
-		if kind, cause := canceled(ctx); cause != nil {
+		if kind, cause := life.check(); cause != nil {
 			result.Kind = kind
 			return result, cause
 		}
@@ -150,8 +166,8 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 			result.Kind = ResultStreamInterrupted
 			return result, failure("proxy: invalid upstream event", provider.ErrStreamInterrupted)
 		}
-		if result.FirstByteMs < 0 {
-			result.FirstByteMs = time.Since(started).Milliseconds()
+		if err := life.ready(&result); err != nil {
+			return result, err
 		}
 		var frame []byte
 		if event.Kind == provider.Done {
@@ -159,11 +175,18 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 		} else {
 			frame = dataFrame(event.Raw)
 		}
-		if kind, cause := canceled(ctx); cause != nil {
+		if kind, cause := life.check(); cause != nil {
 			result.Kind = kind
 			return result, cause
 		}
 		if !result.WroteHeader {
+			if err := downstream.prepare(life); err != nil {
+				return result, err
+			}
+			if kind, cause := life.check(); cause != nil {
+				result.Kind = kind
+				return result, cause
+			}
 			h := w.Header()
 			h.Set("Content-Type", "text/event-stream; charset=utf-8")
 			h.Set("Cache-Control", "no-cache")
@@ -172,6 +195,7 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 			// Native WriteHeader commits; Gin only stages its status. Mark before
 			// either operation can commit, and never roll back after a failure.
 			result.WroteHeader = true
+			downstream.watch(life)
 			w.WriteHeader(http.StatusOK)
 		}
 		n, writeErr := w.Write(frame)
@@ -179,6 +203,10 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 			writeErr = io.ErrShortWrite
 		}
 		if writeErr == nil {
+			if kind, cause := life.check(); cause != nil {
+				result.Kind = kind
+				return result, cause
+			}
 			writeErr = flush()
 		}
 		if writeErr != nil {

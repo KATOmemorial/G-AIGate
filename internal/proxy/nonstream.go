@@ -22,24 +22,33 @@ func (*forwarder) ForwardNonStream(ctx context.Context, w http.ResponseWriter, o
 		result.Kind = kind
 		return result, cause
 	}
+	life := newLifetime(ctx, started, opts)
+	defer life.finish(&result, &err)
 	flush, err := errorFlusher(w)
 	if err != nil {
 		return result, err
 	}
-	// Like Forward, inherit the request lifetime before opening. Internal budgets
-	// and interruptible downstream writes are supplied by 15.2, not this method.
-	attempt, cancel := context.WithCancel(ctx)
+	downstream, err := newDownstream(w)
+	if err != nil {
+		return result, err
+	}
 	defer func() {
-		cancel()
-		if kind, cause := canceled(ctx); cause != nil {
-			result.Kind = kind
-			err = failure("proxy: request context ended", cause, err)
+		life.closeUpstream()
+		if cleanupErr := downstream.finish(life); cleanupErr != nil {
+			if err == nil {
+				result.Kind = ResultWriteError
+			}
+			err = failure("proxy: downstream cleanup failed", err, cleanupErr)
 		}
 	}()
-	response, usage, err := open(attempt)
-	if kind, cause := canceled(ctx); cause != nil {
+	if kind, cause := life.check(); cause != nil {
 		result.Kind = kind
 		return result, cause
+	}
+	response, usage, err := open(life.upstream)
+	if kind, cause := life.check(); cause != nil {
+		result.Kind = kind
+		return result, failure("proxy: opening ended after cancellation", cause, err)
 	}
 	if err != nil {
 		return result, failure("proxy: upstream opening failed", err)
@@ -47,20 +56,30 @@ func (*forwarder) ForwardNonStream(ctx context.Context, w http.ResponseWriter, o
 	if !validResponse(response, usage) {
 		return result, failure("proxy: invalid upstream JSON response", provider.ErrUpstreamUnavailable)
 	}
-	result.FirstByteMs = time.Since(started).Milliseconds()
-	if kind, cause := canceled(ctx); cause != nil {
+	if err := life.ready(&result); err != nil {
+		return result, err
+	}
+	if err := downstream.prepare(life); err != nil {
+		return result, err
+	}
+	if kind, cause := life.check(); cause != nil {
 		result.Kind = kind
 		return result, cause
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Del("Content-Length")
 	result.WroteHeader = true
+	downstream.watch(life)
 	w.WriteHeader(http.StatusOK)
 	n, writeErr := w.Write(response.Body)
 	if writeErr == nil && n != len(response.Body) {
 		writeErr = io.ErrShortWrite
 	}
 	if writeErr == nil {
+		if kind, cause := life.check(); cause != nil {
+			result.Kind = kind
+			return result, cause
+		}
 		writeErr = flush()
 	}
 	if writeErr != nil {
