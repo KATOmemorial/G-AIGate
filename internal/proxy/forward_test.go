@@ -36,8 +36,11 @@ type outputWriter struct {
 	beforeWrite       func()
 }
 
-func newOutput() *outputWriter              { return &outputWriter{header: make(http.Header)} }
-func (w *outputWriter) Header() http.Header { return w.header }
+func newOutput() *outputWriter { return &outputWriter{header: make(http.Header)} }
+
+// Mechanism-only fixture: real deadline behavior is tested by deadlineOutput.
+func (*outputWriter) SetWriteDeadline(time.Time) error { return nil }
+func (w *outputWriter) Header() http.Header            { return w.header }
 func (w *outputWriter) WriteHeader(status int) {
 	if w.status == 0 {
 		w.status, w.committed = status, w.header.Clone()
