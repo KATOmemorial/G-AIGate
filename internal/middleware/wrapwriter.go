@@ -1,6 +1,10 @@
 package middleware
 
-import "github.com/gin-gonic/gin"
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
 
 // wrapWriter 以组合方式包装 gin.ResponseWriter：嵌入的接口自身
 // 声明了 http.Flusher / http.Hijacker / http.CloseNotifier，因此包装后
@@ -9,6 +13,11 @@ import "github.com/gin-gonic/gin"
 type wrapWriter struct {
 	gin.ResponseWriter
 }
+
+// Unwrap exposes only the immediate next writer (15.1 §3.3). Gin's concrete
+// Unwrap is absent from its ResponseWriter interface; explicitly preserve the
+// chain so callers can discover error-returning Flush without bypassing writes.
+func (w *wrapWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // WrapWriter 返回一个永远透传 Flusher 与 Hijacker 的 ResponseWriter
 // 包装器（10.2 §3 契约签名）。后续需要拦截写行为的中间件（15 proxy
