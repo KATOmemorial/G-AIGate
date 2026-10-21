@@ -34,7 +34,7 @@ func (*forwarder) ForwardNonStream(ctx context.Context, w http.ResponseWriter, o
 	}
 	defer func() {
 		life.closeUpstream()
-		if cleanupErr := downstream.finish(life); cleanupErr != nil {
+		if cleanupErr := downstream.finish(life, result.WroteHeader); cleanupErr != nil {
 			if err == nil {
 				result.Kind = ResultWriteError
 			}

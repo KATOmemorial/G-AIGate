@@ -113,7 +113,7 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 				err = failure("proxy: forwarding failed; upstream cleanup also failed", err, closeErr)
 			}
 		}
-		if cleanupErr := downstream.finish(life); cleanupErr != nil {
+		if cleanupErr := downstream.finish(life, result.WroteHeader); cleanupErr != nil {
 			if err == nil {
 				result.Kind = ResultWriteError
 			}

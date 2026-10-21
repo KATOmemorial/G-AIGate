@@ -223,7 +223,7 @@ func (d *downstream) watch(l *lifetime) {
 	})
 }
 
-func (d *downstream) finish(l *lifetime) error {
+func (d *downstream) finish(l *lifetime, committed bool) error {
 	if d.stop != nil && !d.stop() {
 		<-d.done
 	}
@@ -231,6 +231,16 @@ func (d *downstream) finish(l *lifetime) error {
 		return failure("proxy: cannot interrupt downstream output", d.wakeErr)
 	}
 	if d.deadline.IsZero() {
+		return nil
+	}
+	if !committed {
+		// Arming can yield until after expiry, before the commitment check.
+		// No Write/Flush or writer watcher has run on this path, so there is
+		// no sticky output error to repair: remove the installed connection
+		// deadline so the handler can send its one error response.
+		if err := d.setDeadline(time.Time{}); err != nil {
+			return failure("proxy: cannot clear precommit write deadline", err)
+		}
 		return nil
 	}
 	// An expired response is not reusable; clearing cannot repair a sticky HTTP
