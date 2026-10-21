@@ -528,16 +528,3 @@ func TestForwardWaitsForCloseAndWorkerExit(t *testing.T) {
 		})
 	}
 }
-
-func TestForwardNonStreamM1IsExplicitlyUnavailable(t *testing.T) {
-	called := false
-	w := newOutput()
-	result, err := proxy.NewForwarder().ForwardNonStream(t.Context(), w, func(context.Context) (*provider.ChatResponse, *provider.Usage, error) {
-		called = true
-		return nil, nil, nil
-	}, options)
-	require.ErrorContains(t, err, "pending M2")
-	require.NotEqual(t, proxy.ResultSuccess, result.Kind)
-	require.False(t, called)
-	assertUncommitted(t, w, result)
-}

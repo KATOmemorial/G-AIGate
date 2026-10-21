@@ -50,13 +50,17 @@ func TestForwardGinPreservesStateAndBottomFlushErrors(t *testing.T) {
 	}
 }
 
-func TestForwardRealWrapWriterRejectsBeforeCommitAndHandlerCanMapError(t *testing.T) {
+// Deliberately opaque: preserve the old missing-capability safety boundary
+// independently of the now-transparent production WrapWriter.
+type opaqueGinWriter struct{ gin.ResponseWriter }
+
+func TestForwardOpaqueWriterRejectsBeforeCommitAndHandlerCanMapError(t *testing.T) {
 	bottom := newOutput()
 	bottom.failFlush, bottom.cause = 1, io.ErrClosedPipe
 	c, _ := gin.CreateTestContext(bottom)
-	c.Writer = middleware.WrapWriter(c.Writer)
+	c.Writer = &opaqueGinWriter{ResponseWriter: c.Writer}
 	_, hasUnwrap := c.Writer.(interface{ Unwrap() http.ResponseWriter })
-	require.False(t, hasUnwrap, "real wrapper embeds an interface lacking Unwrap")
+	require.False(t, hasUnwrap, "opaque fixture embeds an interface lacking Unwrap")
 	c.Writer.WriteHeader(http.StatusAccepted)
 	require.False(t, c.Writer.Written())
 	calls := 0
@@ -87,6 +91,7 @@ func TestForwardGinAccessLogUsesActualWriteStatus(t *testing.T) {
 	var result proxy.ForwardResult
 	var forwardErr error
 	router.GET("/stream", func(c *gin.Context) {
+		c.Writer = middleware.WrapWriter(c.Writer)
 		result, forwardErr = proxy.NewForwarder().Forward(c.Request.Context(), c.Writer, scripted(chunk(`{}`), done()).open, options, nil)
 	})
 	bottom := newOutput()

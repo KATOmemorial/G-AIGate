@@ -184,6 +184,24 @@ func TestWrapWriterPassthrough(t *testing.T) {
 	assert.Equal(t, "hi", rec.Body.String())
 }
 
+func TestWrapWriterUnwrapReturnsImmediateLayer(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	first := WrapWriter(c.Writer)
+	second := WrapWriter(first)
+	require.Same(t, first, second.(interface{ Unwrap() http.ResponseWriter }).Unwrap())
+	require.Same(t, c.Writer, first.(interface{ Unwrap() http.ResponseWriter }).Unwrap())
+	second.WriteHeader(http.StatusCreated)
+	require.False(t, c.Writer.Written(), "Gin status staging must remain intact")
+	require.Equal(t, http.StatusCreated, c.Writer.Status())
+	_, err := second.Write([]byte("hi"))
+	require.NoError(t, err)
+	require.True(t, c.Writer.Written())
+	require.Equal(t, 2, c.Writer.Size())
+	require.Equal(t, "hi", rec.Body.String())
+	require.Equal(t, http.StatusCreated, rec.Code)
+}
+
 // ctx 注入/读取辅助（业务字段由后续模块通过 ctx 补充，10.2 §3）。
 func TestContextHelpers(t *testing.T) {
 	tests := []struct {
@@ -236,9 +254,9 @@ func (w *fakeGinWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // 桩实现仅返回 nil，本模块不消费该 deprecated 通知）。
 func (w *fakeGinWriter) CloseNotify() <-chan bool { return nil }
 
-func (w *fakeGinWriter) Status() int          { return w.Code }
-func (w *fakeGinWriter) Size() int             { return w.Body.Len() }
+func (w *fakeGinWriter) Status() int                       { return w.Code }
+func (w *fakeGinWriter) Size() int                         { return w.Body.Len() }
 func (w *fakeGinWriter) WriteString(s string) (int, error) { return w.Body.WriteString(s) }
-func (w *fakeGinWriter) Written() bool        { return w.Code != 0 }
-func (w *fakeGinWriter) WriteHeaderNow()      {}
-func (w *fakeGinWriter) Pusher() http.Pusher  { return nil }
+func (w *fakeGinWriter) Written() bool                     { return w.Code != 0 }
+func (w *fakeGinWriter) WriteHeaderNow()                   {}
+func (w *fakeGinWriter) Pusher() http.Pusher               { return nil }
