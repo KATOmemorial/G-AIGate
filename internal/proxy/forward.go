@@ -210,6 +210,7 @@ func (*forwarder) Forward(ctx context.Context, w http.ResponseWriter, open Strea
 			writeErr = flush()
 		}
 		if writeErr != nil {
+			life.outputFailed(downstream, writeErr)
 			result.Kind = ResultWriteError
 			return result, failure("proxy: downstream output failed", writeErr)
 		}

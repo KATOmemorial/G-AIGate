@@ -83,6 +83,7 @@ func (*forwarder) ForwardNonStream(ctx context.Context, w http.ResponseWriter, o
 		writeErr = flush()
 	}
 	if writeErr != nil {
+		life.outputFailed(downstream, writeErr)
 		result.Kind = ResultWriteError
 		return result, failure("proxy: downstream output failed", writeErr)
 	}
