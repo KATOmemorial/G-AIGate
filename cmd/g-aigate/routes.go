@@ -1,0 +1,51 @@
+package main
+
+import (
+	"log/slog"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+
+	"gaigate/internal/access"
+	"gaigate/internal/bootstrap"
+	"gaigate/internal/config"
+	"gaigate/internal/middleware"
+	"gaigate/internal/provider/openai"
+	"gaigate/internal/proxy"
+	"gaigate/internal/store"
+)
+
+func newGatewayRouter(logger *slog.Logger, probes *middleware.Probes) *gin.Engine {
+	r := gin.New()
+	r.Use(middleware.RequestID(), middleware.AccessLog(logger), middleware.Recover())
+	r.Use(func(c *gin.Context) {
+		c.Writer = middleware.WrapWriter(c.Writer)
+		c.Next()
+	})
+	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	r.GET("/readyz", probes.ReadyHandler())
+	return r
+}
+
+func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg config.ProxyConfig, logger *slog.Logger) error {
+	cache := store.NewConfigCache(0) // Existing store default TTL and invalidation semantics.
+	models := store.NewModelRepo(db, cache)
+	channels := store.NewChannelRepo(db, cache)
+	keys := store.NewKeyRepo(db)
+	upstream, err := openai.New(&http.Client{}, cfg.StreamBuffer)
+	if err != nil {
+		return err
+	}
+	executor, err := bootstrap.NewExecutor(models, channels, keys, upstream, proxy.NewForwarder(), masterKey,
+		proxy.ForwardOptions{TTFBTimeout: cfg.TTFBTimeout, OverallTimeout: cfg.OverallTimeout}, logger)
+	if err != nil {
+		return err
+	}
+	userKeys, users := store.NewAPIKeyRepo(db), store.NewUserRepo(db)
+	auth := access.AuthMiddleware(access.NewAuthenticator(userKeys, users))
+	access.RegisterV1Routes(r, auth, bootstrap.AllowAll{}, executor, models)
+	// TODO(19.1): replace Bearer with session/CSRF identity at assembly (台账#23).
+	access.RegisterUserKeyRoutes(r, auth, access.NewKeyService(userKeys, users))
+	return nil
+}

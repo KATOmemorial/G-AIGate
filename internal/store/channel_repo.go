@@ -12,6 +12,9 @@ import (
 // ChannelRepo 是渠道配置的读写层（11.2 §3 冻结签名；跨模块契约见 00 §6.3）。
 // 消费方：16.1/16.2（路由读渠道）、14.1（管理 CRUD）。
 type ChannelRepo interface {
+	// GetModel reads one channel/model mapping without caching (13.3).
+	// A missing pair wraps ErrNotFound; other SQL errors retain their cause.
+	GetModel(ctx context.Context, channelID int64, model string) (*ChannelModel, error)
 	// ListActiveByModel 返回 enabled 且服务该模型的渠道，priority 降序（走缓存）。
 	ListActiveByModel(ctx context.Context, model string) ([]Channel, error)
 	// Get 按 id 读取渠道（不缓存）；未命中返回 ErrNotFound。
@@ -35,6 +38,18 @@ type channelRepo struct {
 // 读方法走缓存，写方法不回源缓存（失效由调用方经 Invalidator 触发）。
 func NewChannelRepo(db *gorm.DB, cache *ConfigCache) ChannelRepo {
 	return &channelRepo{db: db, cache: cache}
+}
+
+func (r *channelRepo) GetModel(ctx context.Context, channelID int64, model string) (*ChannelModel, error) {
+	var mapping ChannelModel
+	if err := r.db.WithContext(ctx).Where("channel_id = ? AND model = ?", channelID, model).
+		First(&mapping).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("store: channel model mapping: %w", ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: read channel model mapping: %w", err)
+	}
+	return &mapping, nil
 }
 
 // ListActiveByModel 走缓存（TTL 60s + singleflight）；未命中回源 listActiveByModel。

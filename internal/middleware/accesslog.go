@@ -12,8 +12,8 @@ import (
 // ts, level（日志器配置，ts 键由 main 的 newLogger 经 ReplaceAttr 改写）
 // + request_id, user_id, channel_id, model,
 // latency_ms, status_class, status_code, method, path。
-// 业务字段由后续模块通过 ctx 注入（context.go 的 With* 入口），
-// B2 阶段为零值占位。
+// 13.3: With* helpers synchronize a request-local summary even when an inner
+// executor derives context without replacing the outer c.Request.
 //
 // 管道顺序（10.2 §3 契约，2026-10-10 修正）：RequestID → AccessLog → Recover。
 // AccessLog 在 Recover 之外（先注册）：panic 展栈时内层 defer 先执行，
@@ -23,8 +23,10 @@ import (
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
+		c.Request = c.Request.WithContext(withRequestSummary(c.Request.Context()))
 		defer func() {
 			ctx := c.Request.Context()
+			userID, channelID, model := completedFields(ctx)
 			status := c.Writer.Status()
 			requestID, ok := RequestIDFromContext(ctx)
 			if !ok {
@@ -34,9 +36,9 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 			}
 			logger.Info("request_done",
 				"request_id", requestID,
-				"user_id", UserIDFromContext(ctx),
-				"channel_id", ChannelIDFromContext(ctx),
-				"model", ModelFromContext(ctx),
+				"user_id", userID,
+				"channel_id", channelID,
+				"model", model,
 				"latency_ms", time.Since(start).Milliseconds(),
 				"status_class", statusClass(status),
 				"status_code", status,

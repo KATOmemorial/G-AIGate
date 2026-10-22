@@ -150,7 +150,8 @@ func TestPipelineOrderAccessLogContainsRequestID(t *testing.T) {
 	// panic 堆栈日志（Recover 产出）也带同一 request_id，且含堆栈
 	stackEntry := findLogEntry(t, &buf, "panic recovered")
 	assert.Equal(t, w.Header().Get("X-Request-Id"), stackEntry["request_id"])
-	assert.Equal(t, "boom for test", stackEntry["panic"])
+	assert.Equal(t, "panic", stackEntry["reason"])
+	assert.NotContains(t, buf.String(), "boom for test")
 	assert.Contains(t, stackEntry["stack"], "recover.go")
 }
 
