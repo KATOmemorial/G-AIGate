@@ -29,6 +29,7 @@ proxy:
   stream-buffer: 64       # 有界缓冲 chunk 数（15.2）
 
 channel:
+  probe-timeout: 5s       # 单次最小chat探测总预算，至少1ms（14.1）
   probe-interval: 30s     # 探活间隔（14.3）
   failure-threshold: 5    # 连续失败→禁用阈值（14.3）
   disable-duration: 60s   # 禁用冷却时长（14.3）

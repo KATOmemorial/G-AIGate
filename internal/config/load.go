@@ -103,6 +103,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("proxy.overall-timeout", 300*time.Second)
 	v.SetDefault("proxy.stream-buffer", 64)
 	v.SetDefault("channel.probe-interval", 30*time.Second)
+	v.SetDefault("channel.probe-timeout", 5*time.Second)
 	v.SetDefault("channel.failure-threshold", 5)
 	v.SetDefault("channel.disable-duration", 60*time.Second)
 	v.SetDefault("router.breaker-window", 60*time.Second)
@@ -148,6 +149,9 @@ func (c *Config) validate() error {
 
 	if c.Channel.ProbeInterval <= 0 {
 		errs = append(errs, fmt.Sprintf("channel.probe_interval: 须大于 0，实际 %s", c.Channel.ProbeInterval))
+	}
+	if c.Channel.ProbeTimeout < time.Millisecond {
+		errs = append(errs, "channel.probe_timeout: 须至少为1ms")
 	}
 	if c.Channel.FailureThreshold <= 0 {
 		errs = append(errs, fmt.Sprintf("channel.failure_threshold: 须大于 0，实际 %d", c.Channel.FailureThreshold))

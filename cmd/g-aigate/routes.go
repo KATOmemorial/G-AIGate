@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
 	"gaigate/internal/access"
 	"gaigate/internal/bootstrap"
+	"gaigate/internal/channel"
 	"gaigate/internal/config"
 	"gaigate/internal/middleware"
 	"gaigate/internal/provider/openai"
@@ -28,7 +31,7 @@ func newGatewayRouter(logger *slog.Logger, probes *middleware.Probes) *gin.Engin
 	return r
 }
 
-func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg config.ProxyConfig, logger *slog.Logger) error {
+func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg config.ProxyConfig, probeTimeout time.Duration, logger *slog.Logger) error {
 	cache := store.NewConfigCache(0) // Existing store default TTL and invalidation semantics.
 	models := store.NewModelRepo(db, cache)
 	channels := store.NewChannelRepo(db, cache)
@@ -47,5 +50,22 @@ func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg con
 	access.RegisterV1Routes(r, auth, bootstrap.AllowAll{}, executor, models)
 	// TODO(19.1): replace Bearer with session/CSRF identity at assembly (台账#23).
 	access.RegisterUserKeyRoutes(r, auth, access.NewKeyService(userKeys, users))
+	admin, err := channel.NewAdminService(channels, keys, models, cache, masterKey)
+	if err != nil {
+		return err
+	}
+	picker, err := channel.NewProbePicker(channels, keys, masterKey)
+	if err != nil {
+		return err
+	}
+	tester, err := channel.NewConnectivityTester(picker, upstream, probeTimeout)
+	if err != nil {
+		return err
+	}
+	// TODO(19.1): replace all management Bearer routes with session/CSRF identity.
+	channel.RegisterAdminRoutes(r, auth, func(ctx context.Context) bool {
+		p, ok := access.PrincipalFromContext(ctx)
+		return ok && p.Role == store.RoleAdmin
+	}, admin, tester)
 	return nil
 }
