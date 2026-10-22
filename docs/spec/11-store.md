@@ -50,3 +50,9 @@ B2 检查点贡献：`docker compose up mysql redis` 后 `go test ./internal/sto
 13.3 的 bootstrap 在 B3 临时承担端点组装与 secret 解密，B4／B5 由 14.2／16.4 接管；store 仍只返回密文，不把解密放仓储。02 #9 模型列表部分已折入冻结文档，渠道列表等剩余部分仍属 14.1；#11／#12 维持原管理归属。完整新签名见 13.1／13.3，不追认这些是 11.2 已交付方法。
 
 冻结登记：2026-10-20 用户在主会话确认 B3 文档，本节对应增量已批准；不扩展为对其他待细化内容的整体批准，不改写已交付历史，新增实现仍由指定 L2 负责。
+
+## 8. B4仓储原语候选（2026-10-22，待用户review）
+
+00 §6.10／14.1候选补ChannelRepo.List／ListModels／UpdateConfig及KeyRepo三个Owned方法，统一父行锁序（含Delete）、事务mapping维护及管理写后共享ConfigCache失效；14.3补UpdateHealthView，仅写健康展示两列。不改表／seed／旧签名，不把新增能力追认成11.2历史交付。
+
+14.3另补VersionedHealthState.LoadVersioned／CompareAndSwap及HealthRecord，用原HASH新增version字段实现跨副本原子转移，旧HealthState／HealthSnapshot及11.4历史不变；业务判定仍在channel，store只负责无策略CAS。B4统一新接口写健康，不混旧Save。原语测试与真实Redis多client验证归14.3；现阶段候选未生效。

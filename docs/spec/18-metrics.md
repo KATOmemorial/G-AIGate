@@ -54,3 +54,9 @@ B7 前置：`/metrics` 文本可查全部指标；一次容灾请求的 trace �
 ForwardResult 的结果类别不能替代 HTTP 提交状态：HTTP 200 可伴随后续中断，需独立的失败／中断观测；WroteHeader=false 也不保证应当切换。移交记录见 02，B3 不提前实现 Prometheus／OTel。
 
 冻结登记：2026-10-20 用户在主会话确认 B3 文档，本节对应增量已批准；不扩展为对其他待细化内容的整体批准，不改写已交付历史，新增实现仍由指定 L2 负责。
+
+## 8. B4观测移交候选（2026-10-22，待用户review）
+
+14.3候选仅镜像health_status／last_checked_at，不用单次probe latency伪造latency_p99_cache或error_rate_cache。未来统计样本、窗口、冷启动及展示列生产由14后续轮／16.2与18.1共同冻结，现阶段台账#32 open。18仍是被动观测helper，不因此获得import store／channel或直接写库的权限；聚合／装配owner须另行明确。
+
+已有proxy FirstByteMs／Kind口径不变，probe总耗时不混进业务TTFB／p99样本；B4暂不实现Prometheus／OTel或页面。未批准、未实现。

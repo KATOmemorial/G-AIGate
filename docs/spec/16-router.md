@@ -54,3 +54,11 @@ B5 检查点（全模块，项目最重的一场）：mock 双渠道编排 `norm
 结果类别新增 upstream_error／write_error，参见 15.1，不能假设 OverallTimeout 必已写头。用 middleware.WithChannelID 同步本请求摘要，在候选切换后完成日志能反映最终实际渠道；不要回写全局或跨请求共享 context。临时路径接管与观测口径登记 02，正式 L2 撰写时消费。
 
 冻结登记：2026-10-20 用户在主会话确认 B3 文档，本节对应增量已批准；不扩展为对其他待细化内容的整体批准，不改写已交付历史，新增实现仍由指定 L2 负责。
+
+## 8. B4接管消费候选（2026-10-22，待用户review）
+
+00 §6.10／14.1～14.3拟先交付配置SWRR与Redis健康；B4 bootstrap仅按priority／id预先过滤健康后选一个，不重试，不实现breaker。16.1／16.4接管时移除临时选择／健康接线，继续用HealthRegistry及EndpointPicker（明确*store.Channel）；别名引用缺失渠道须过滤，候选全空503，不因保留引用而panic。
+
+健康结果成功true、中断／TTFB／Overall为false；上游错误除HTTP400／404／422忽略外计false，客户取消／下游WriteError忽略。先按Kind、仅上游错误再看状态码，不从原因链Canceled改判；正式执行器双喂breaker时另冻各自分类，不把两个状态机合并。14.2无Key失败反馈／动态降权，Endpoint无KeyID，未来另审。
+
+14.3不生产错误率／p99展示缓存，latency_first的数据来源、空样本／全零时确定性排序须16.2开工前细化，不以probe单点值冒称p99。18.1仍为被动helper，不授权metrics反向import业务包。候选未生效、不改此前B3冻结记录。
