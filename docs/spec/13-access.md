@@ -17,7 +17,7 @@
 | POST /v1/chat/completions | Bearer → Principal → 请求校验 → Precheck → ChatExecutor；流式 SSE 或非流式 JSON |
 | GET /v1/models | 同一 Bearer；返回 `{"object":"list","data":[...]}`，列全部已配置别名 |
 | GET／POST／DELETE /api/v1/user/keys[/:id] | B3 复用 Bearer 本人身份；19.1 后换为会话身份，业务服务只信标准 context 中的 Principal |
-| cmd/g-aigate-key | 本地运维创建入口，显式用户名；仅成功时向 stdout 返回一次创建 JSON，不启动网关、不走 seed |
+| cmd/g-aigate-key | 本地运维创建入口，显式用户名；仅成功时向 stdout 返回一次创建 JSON，不启动网关、不走 seed；初始化最小例外见13.4 §3.4，待用户转交确认 |
 
 Authenticator／Principal／Provider 的权威签名在 00 §6.1／§6.2。access 的 ChatExecutor 接收请求而非 router.Plan；B5 需要装配适配器，不能声称与 router.Executor 签名相同。详见 13.3 §3。
 
@@ -74,3 +74,4 @@ Authenticator／Principal／Provider 的权威签名在 00 §6.1／§6.2。acces
 | 2026-10-20 | 主会话，13.1 验收收尾 | 根据 13.1 §11.7～§11.9 的独立审查及交付记录，核对 main 已含合并提交 `99a7962`、收尾提交 `c61fa4c` 与本地 origin/main 同值、已审查实现无合并差异。登记 13.1 已验收，下一份为已冻结的 13.2，按 M1 请求／非流式／错误、M2 SSE／关闭／mock 交叉验证施工；未改冻结契约，未宣称 13 模块整体或 B3／M0 完成 |
 | 2026-10-20 | 主会话，13.2 验收与后续衔接 | 根据 13.2 §11.12～§11.14 的独立复审及交付记录，核对两项 P2 已关闭、main 已含合并提交 `becc0f8`、收尾提交 `570a7af` 与本地 origin/main 同值、已复审实现未被合并改变。同步 13.2 已验收，下一份为 15.1；13.3／13.4 等保持原归属，未改冻结契约，13 模块整体及 B3／M0 尚未完成 |
 | 2026-10-21 | 主会话，转发前置交付与13.4开工准备 | 核对15.1／15.2均经独立审查／复审及合并推送，main收尾9d11eac与本地origin/main同值。下一份沿已冻结13.4交付本人Key服务／HTTP和本地首次创建命令，之后13.3装配；不新增身份桩／签名／仓储职责，不宣称本模块或B3／M0完成 |
+| 2026-10-21 | 主会话初始化裁定，待用户转交确认 | 按13.4 §3.4允许仅cmd/g-aigate-key使用私有可取消MySQL初始化适配而不直接store.Open；同一10s ctx、真实版本检测／Ping、原配置／仓储／资源回收保留，不改store公开接口或其他入口。实现与完整验证仍待用户转交后交付 |
