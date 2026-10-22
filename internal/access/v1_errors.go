@@ -20,7 +20,7 @@ func writeV1Error(c *gin.Context, err error) {
 	var execution *ExecutionError
 	errors.As(err, &execution)
 	if c.Writer.Written() || execution != nil && execution.WroteHeader {
-		// M2 makes the production Recover transparently propagate this sentinel.
+		// Recover transparently propagates this sentinel to net/http.
 		panic(http.ErrAbortHandler)
 	}
 	// Consume the classified budget flag before inspecting Canceled: a latched

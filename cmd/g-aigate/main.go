@@ -47,16 +47,11 @@ func main() {
 	slog.SetDefault(logger)
 
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	// 中间件管道（10.2 §3 契约，2026-10-10 修正）：
-	// RequestID → AccessLog → Recover → 路由
-	r.Use(middleware.RequestID(), middleware.AccessLog(logger), middleware.Recover())
 
 	// 探针（10-L1 §3 决策②）：/healthz liveness 恒 200；/readyz 由
 	// Probes 动态注册检查项（10.2 §4 决策①）。
 	probes := &middleware.Probes{}
-	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
-	r.GET("/readyz", probes.ReadyHandler())
+	r := newGatewayRouter(logger, probes)
 
 	// store 装配（11.1 §2）：启动迁移（GET_LOCK 防多副本并发）→
 	// GORM 客户端 → 幂等 seed。任何一步失败均 fail-fast 退出（exit 1）。
@@ -94,6 +89,10 @@ func main() {
 		MasterKey:     masterKey,
 	}); err != nil {
 		logger.Error("seed 失败", "err", err.Error())
+		os.Exit(1)
+	}
+	if err := registerGatewayRoutes(r, db, masterKey, cfg.Proxy, logger); err != nil {
+		logger.Error("网关路由装配失败")
 		os.Exit(1)
 	}
 
