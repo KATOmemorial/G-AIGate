@@ -55,8 +55,10 @@ ForwardResult 的结果类别不能替代 HTTP 提交状态：HTTP 200 可伴随
 
 冻结登记：2026-10-20 用户在主会话确认 B3 文档，本节对应增量已批准；不扩展为对其他待细化内容的整体批准，不改写已交付历史，新增实现仍由指定 L2 负责。
 
-## 8. B4观测移交候选（2026-10-22，待用户review）
+## 8. B4观测移交（2026-10-22，已冻结）
 
-14.3候选仅镜像health_status／last_checked_at，不用单次probe latency伪造latency_p99_cache或error_rate_cache。未来统计样本、窗口、冷启动及展示列生产由14后续轮／16.2与18.1共同冻结，现阶段台账#32 open。18仍是被动观测helper，不因此获得import store／channel或直接写库的权限；聚合／装配owner须另行明确。
+14.3冻结范围仅镜像health_status／last_checked_at，不用单次probe latency伪造latency_p99_cache或error_rate_cache。未来统计样本、窗口、冷启动及展示列生产由14后续轮／16.2与18.1共同冻结，现阶段台账#32 open。18仍是被动观测helper，不因此获得import store／channel或直接写库的权限；聚合／装配owner须另行明确。
 
-已有proxy FirstByteMs／Kind口径不变，probe总耗时不混进业务TTFB／p99样本；B4暂不实现Prometheus／OTel或页面。未批准、未实现。
+已有proxy FirstByteMs／Kind口径不变，probe总耗时不混进业务TTFB／p99样本；B4暂不实现Prometheus／OTel或页面。文档已冻结，尚未实现。
+
+冻结登记：2026-10-22，用户在候选提交4eb8192及review清单交付后回复“请你开始工作”，本节随00 v0.10／B4文档确认生效；只登记既有候选效力，不新增范围，不代表实现／验收。
