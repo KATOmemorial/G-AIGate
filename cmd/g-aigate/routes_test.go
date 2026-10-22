@@ -157,7 +157,7 @@ func assembledGateway(t *testing.T, db *gorm.DB, master []byte, cfg config.Proxy
 		}()
 		c.Next()
 	})
-	require.NoError(t, registerGatewayRoutes(r, db, master, cfg, logger))
+	require.NoError(t, registerGatewayRoutes(r, db, master, cfg, 5*time.Second, logger))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return srv, stats
@@ -428,7 +428,7 @@ func TestGatewayAssemblyRejectsInvalidConfigurationBeforeRoutes(t *testing.T) {
 		logs := newGatewayLogs()
 		logger := newLogger(logs, "info")
 		r := newGatewayRouter(logger, &middleware.Probes{})
-		require.Error(t, registerGatewayRoutes(r, nil, tc.key, tc.cfg, logger))
+		require.Error(t, registerGatewayRoutes(r, nil, tc.key, tc.cfg, 5*time.Second, logger))
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest("GET", "/v1/models", nil))
 		assert.Equal(t, 404, w.Code)
