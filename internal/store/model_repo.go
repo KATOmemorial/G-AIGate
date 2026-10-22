@@ -14,6 +14,8 @@ import (
 // ModelRepo 是模型别名（model_aliases）的读写层（11.2 §3 冻结签名；
 // 跨模块契约见 00 §6.3）。消费方：16.1/16.2（路由解析别名）、14.1（管理 CRUD）。
 type ModelRepo interface {
+	// List returns all configured aliases by name, without the Resolve cache (13.3).
+	List(ctx context.Context) ([]ModelAlias, error)
 	// Resolve 按别名解析出 ModelAlias（default_channel_id + fallback_ids + strategy），走缓存。
 	// 未命中返回 ErrNotFound。
 	Resolve(ctx context.Context, name string) (*ModelAlias, error)
@@ -34,6 +36,14 @@ type modelRepo struct {
 // NewModelRepo 装配别名访问层。cache 为共享的配置读缓存（11-L1 §1）。
 func NewModelRepo(db *gorm.DB, cache *ConfigCache) ModelRepo {
 	return &modelRepo{db: db, cache: cache}
+}
+
+func (r *modelRepo) List(ctx context.Context) ([]ModelAlias, error) {
+	aliases := make([]ModelAlias, 0)
+	if err := r.db.WithContext(ctx).Order("name ASC").Find(&aliases).Error; err != nil {
+		return nil, fmt.Errorf("store: list model aliases: %w", err)
+	}
+	return aliases, nil
 }
 
 // Resolve 走缓存；未命中回源 resolveByName。
