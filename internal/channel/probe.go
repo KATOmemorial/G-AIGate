@@ -47,6 +47,9 @@ func assembleEndpoint(ctx context.Context, ch *store.Channel, mapping *store.Cha
 	if err != nil {
 		return nil, failure("endpoint Key decryption failed", err)
 	}
+	if len(raw) == 0 {
+		return nil, failure("empty endpoint Key", nil)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, failure("endpoint assembly canceled", err)
 	}

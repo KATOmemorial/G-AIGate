@@ -278,6 +278,9 @@ func TestGatewayAssemblySelectionErrorsAndAbort(t *testing.T) {
 	keys := store.NewKeyRepo(db)
 	require.NoError(t, keys.Add(context.Background(), int64(chosen.ID), enc))
 	require.NoError(t, keys.Add(context.Background(), int64(chosen.ID), []byte("bad later ciphertext")))
+	// 14.2 replaces the old first-Key assumption. Keep this protocol/error
+	// matrix on one active Key; dedicated SWRR tests cover bad selected slots.
+	require.NoError(t, db.Model(&store.ChannelKey{}).Where("channel_id = ? AND provider_key_enc = ?", chosen.ID, []byte("bad later ciphertext")).Update("status", 0).Error)
 	model := store.ModelAlias{Name: "alias", DefaultChannelID: &fallback.ID, FallbackIDs: fmt.Sprintf("[%d]", fallback.ID)}
 	models := store.NewModelRepo(db, store.NewConfigCache(0))
 	require.NoError(t, models.Create(context.Background(), &model))

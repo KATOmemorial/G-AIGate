@@ -310,12 +310,16 @@ func TestEndpointPickerFailureClassificationAndConsumedSlots(t *testing.T) {
 		_, err = f.p.Pick(context.Background(), f.ch, "a")
 		assert.Error(t, err)
 	}
-	for _, stage := range []string{"decrypt", "assembly"} {
+	for _, stage := range []string{"decrypt", "empty Key", "assembly"} {
 		t.Run(stage, func(t *testing.T) {
 			f := newEndpointFixture(t, 1, 1)
-			if stage == "decrypt" {
+			switch stage {
+			case "decrypt":
 				f.rows[0].ProviderKeyEnc = []byte("private-corrupt-ciphertext")
-			} else {
+			case "empty Key":
+				f.rows[0].ProviderKeyEnc, err = secret.Encrypt(nil, f.master)
+				require.NoError(t, err)
+			default:
 				f.mapping.UpstreamModel = ""
 			}
 			_, err := f.p.Pick(context.Background(), f.ch, "a")
