@@ -91,7 +91,7 @@ func main() {
 		logger.Error("seed 失败", "err", err.Error())
 		os.Exit(1)
 	}
-	if err := registerGatewayRoutes(r, db, masterKey, cfg.Proxy, logger); err != nil {
+	if err := registerGatewayRoutes(r, db, masterKey, cfg.Proxy, cfg.Channel.ProbeTimeout, logger); err != nil {
 		logger.Error("网关路由装配失败")
 		os.Exit(1)
 	}

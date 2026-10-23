@@ -216,10 +216,15 @@ func (f *gatewayProcessFixture) environment() []string {
 }
 
 func (f *gatewayProcessFixture) startGateway(t *testing.T, ttfb, overall time.Duration) (*ownedProcess, string) {
+	return f.startGatewayWithProbeTimeout(t, ttfb, overall, 5*time.Second)
+}
+
+func (f *gatewayProcessFixture) startGatewayWithProbeTimeout(t *testing.T, ttfb, overall, probe time.Duration) (*ownedProcess, string) {
 	t.Helper()
 	addr := processPort(t)
 	path := filepath.Join(f.dir, fmt.Sprintf("gateway-%d.yaml", len(f.gateways)))
 	source := fmt.Sprintf("server:\n  addr: %q\n  shutdown-timeout: 2s\nproxy:\n  ttfb-timeout: %s\n  overall-timeout: %s\n  stream-buffer: 1\n", addr, ttfb, overall)
+	source += fmt.Sprintf("channel:\n  probe-timeout: %s\n", probe)
 	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
 	p := startOwnedProcess(t, f.root, f.gatewayBinary, f.environment(), "-config", path)
 	f.gateways = append(f.gateways, p)

@@ -36,10 +36,10 @@ type LogConfig struct {
 
 // MySQLConfig 数据库连接（11 store）。
 type MySQLConfig struct {
-	Host     string `yaml:"host" mapstructure:"host"`           // 默认 127.0.0.1
-	Port     int    `yaml:"port" mapstructure:"port"`           // 默认 3306
-	User     string `yaml:"user" mapstructure:"user"`           // 默认 root
-	Database string `yaml:"database" mapstructure:"database"`   // 默认 gaigate
+	Host     string `yaml:"host" mapstructure:"host"`         // 默认 127.0.0.1
+	Port     int    `yaml:"port" mapstructure:"port"`         // 默认 3306
+	User     string `yaml:"user" mapstructure:"user"`         // 默认 root
+	Database string `yaml:"database" mapstructure:"database"` // 默认 gaigate
 	// 仅环境变量 GAIGATE_MYSQL_PASSWORD；yaml 中出现即报错（防密钥入库）
 	Password string `yaml:"password" mapstructure:"password"`
 }
@@ -62,6 +62,8 @@ type ProxyConfig struct {
 
 // ChannelConfig 渠道健康（14 channel）。
 type ChannelConfig struct {
+	// 单次最小chat探测的总预算，默认5s（14.1）
+	ProbeTimeout time.Duration `yaml:"probe-timeout" mapstructure:"probe-timeout"`
 	// 探活间隔，默认 30s
 	ProbeInterval time.Duration `yaml:"probe-interval" mapstructure:"probe-interval"`
 	// 连续失败→禁用阈值，默认 5

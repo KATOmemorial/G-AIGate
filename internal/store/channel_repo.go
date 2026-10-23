@@ -7,11 +7,16 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ChannelRepo 是渠道配置的读写层（11.2 §3 冻结签名；跨模块契约见 00 §6.3）。
 // 消费方：16.1/16.2（路由读渠道）、14.1（管理 CRUD）。
 type ChannelRepo interface {
+	// 14.1 management reads bypass the configuration cache.
+	List(ctx context.Context) ([]Channel, error)
+	ListModels(ctx context.Context, channelID int64) ([]ChannelModel, error)
+	UpdateConfig(ctx context.Context, ch *Channel, models []ChannelModel) error
 	// GetModel reads one channel/model mapping without caching (13.3).
 	// A missing pair wraps ErrNotFound; other SQL errors retain their cause.
 	GetModel(ctx context.Context, channelID int64, model string) (*ChannelModel, error)
@@ -167,6 +172,9 @@ func (r *channelRepo) Update(ctx context.Context, ch *Channel) error {
 // 不在此处隐式处理，60s TTL 兜底见 11-L1 §1。）
 func (r *channelRepo) Delete(ctx context.Context, id int64) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockChannel(tx, id); err != nil {
+			return err
+		}
 		if err := tx.Where("channel_id = ?", id).Delete(&ChannelKey{}).Error; err != nil {
 			return fmt.Errorf("store: 删除渠道 %d 的 Key: %w", id, err)
 		}
@@ -179,6 +187,66 @@ func (r *channelRepo) Delete(ctx context.Context, id int64) error {
 		}
 		if res.RowsAffected == 0 {
 			return fmt.Errorf("store: 删除渠道 %d: %w", id, ErrNotFound)
+		}
+		return nil
+	})
+}
+
+// lockChannel is shared by configuration replacement, deletion and Owned Key
+// writes. Always acquire the parent before touching children, including inserts.
+func lockChannel(tx *gorm.DB, id int64) error {
+	var ch Channel
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Where("id = ?", id).First(&ch).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("store: lock channel: %w", ErrNotFound)
+		}
+		return fmt.Errorf("store: lock channel: %w", err)
+	}
+	return nil
+}
+
+func (r *channelRepo) List(ctx context.Context) ([]Channel, error) {
+	channels := make([]Channel, 0)
+	if err := r.db.WithContext(ctx).Order("id ASC").Find(&channels).Error; err != nil {
+		return nil, fmt.Errorf("store: list channels: %w", err)
+	}
+	return channels, nil
+}
+
+func (r *channelRepo) ListModels(ctx context.Context, channelID int64) ([]ChannelModel, error) {
+	if _, err := r.Get(ctx, channelID); err != nil {
+		return nil, err
+	}
+	models := make([]ChannelModel, 0)
+	if err := r.db.WithContext(ctx).Where("channel_id = ?", channelID).Order("model ASC").Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("store: list channel models: %w", err)
+	}
+	return models, nil
+}
+
+func (r *channelRepo) UpdateConfig(ctx context.Context, ch *Channel, models []ChannelModel) error {
+	if ch == nil || ch.ID == 0 || ch.ID > uint64(1<<63-1) {
+		return fmt.Errorf("store: UpdateConfig requires a valid channel ID")
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockChannel(tx, int64(ch.ID)); err != nil {
+			return err
+		}
+		if err := tx.Model(&Channel{}).Where("id = ?", ch.ID).Updates(map[string]any{
+			"name": ch.Name, "provider": ch.Provider, "base_url": ch.BaseURL,
+			"priority": ch.Priority, "weight": ch.Weight, "enabled": ch.Enabled,
+			"updated_at": time.Now().UTC(),
+		}).Error; err != nil {
+			return fmt.Errorf("store: update channel config: %w", err)
+		}
+		if err := tx.Where("channel_id = ?", ch.ID).Delete(&ChannelModel{}).Error; err != nil {
+			return fmt.Errorf("store: replace channel models: %w", err)
+		}
+		for _, model := range models {
+			row := ChannelModel{ChannelID: ch.ID, Model: model.Model, UpstreamModel: model.UpstreamModel}
+			if err := tx.Create(&row).Error; err != nil {
+				return fmt.Errorf("store: insert channel model: %w", err)
+			}
 		}
 		return nil
 	})
