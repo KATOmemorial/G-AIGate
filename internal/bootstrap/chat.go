@@ -10,10 +10,10 @@ import (
 	"reflect"
 
 	"gaigate/internal/access"
+	"gaigate/internal/channel"
 	"gaigate/internal/middleware"
 	"gaigate/internal/provider"
 	"gaigate/internal/proxy"
-	"gaigate/internal/secret"
 	"gaigate/internal/store"
 )
 
@@ -26,29 +26,28 @@ func (AllowAll) Precheck(context.Context, *access.Principal) error { return nil 
 type executor struct {
 	models    store.ModelRepo
 	channels  store.ChannelRepo
-	keys      store.KeyRepo
+	picker    channel.EndpointPicker
 	upstream  provider.Provider
 	forwarder proxy.Forwarder
-	masterKey []byte
 	opts      proxy.ForwardOptions
 	logger    *slog.Logger
 }
 
-// NewExecutor receives decoded key material and proxy options from assembly;
-// no business package reads global configuration or environment variables.
-func NewExecutor(models store.ModelRepo, channels store.ChannelRepo, keys store.KeyRepo,
-	upstream provider.Provider, forwarder proxy.Forwarder, masterKey []byte,
+// NewExecutor receives the endpoint picker and proxy options from assembly.
+// Endpoint selection, model mapping and decryption belong to channel (14.2).
+func NewExecutor(models store.ModelRepo, channels store.ChannelRepo, picker channel.EndpointPicker,
+	upstream provider.Provider, forwarder proxy.Forwarder,
 	opts proxy.ForwardOptions, logger *slog.Logger) (access.ChatExecutor, error) {
-	for _, dependency := range []any{models, channels, keys, upstream, forwarder, logger} {
+	for _, dependency := range []any{models, channels, picker, upstream, forwarder, logger} {
 		if nilDependency(dependency) {
 			return nil, errors.New("bootstrap: missing dependency")
 		}
 	}
-	if len(masterKey) != 32 || opts.TTFBTimeout <= 0 || opts.OverallTimeout <= 0 {
-		return nil, errors.New("bootstrap: invalid key or forwarding options")
+	if opts.TTFBTimeout <= 0 || opts.OverallTimeout <= 0 {
+		return nil, errors.New("bootstrap: invalid forwarding options")
 	}
-	return &executor{models: models, channels: channels, keys: keys, upstream: upstream,
-		forwarder: forwarder, masterKey: append([]byte(nil), masterKey...), opts: opts, logger: logger}, nil
+	return &executor{models: models, channels: channels, picker: picker, upstream: upstream,
+		forwarder: forwarder, opts: opts, logger: logger}, nil
 }
 
 type stageError struct {
@@ -81,7 +80,6 @@ func (e *executor) Execute(ctx context.Context, w http.ResponseWriter, _ *access
 	if len(channels) == 0 {
 		return failure("bootstrap: no channel", provider.ErrNoCandidate)
 	}
-	// TODO(14.2): replace first enabled Key with the owned picker (台账#21).
 	// TODO(16.1): replace priority/id selection with routing (台账#21).
 	// TODO(16.4): replace this single attempt; B3 never retries/falls back (台账#21).
 	ch := channels[0]
@@ -94,35 +92,13 @@ func (e *executor) Execute(ctx context.Context, w http.ResponseWriter, _ *access
 		return failure("bootstrap: invalid channel configuration", nil)
 	}
 	ctx = middleware.WithChannelID(ctx, int64(ch.ID))
-	keys, err := e.keys.ListByChannel(ctx, int64(ch.ID))
+	endpoint, err := e.picker.Pick(ctx, &ch, req.Model)
 	if err != nil {
-		return failure("bootstrap: key lookup failed", err)
+		return failure("bootstrap: endpoint selection failed", err)
 	}
-	var selected *store.ChannelKey
-	for i := range keys {
-		if keys[i].Status == store.ChannelKeyStatusActive && (selected == nil || keys[i].ID < selected.ID) {
-			selected = &keys[i]
-		}
+	if endpoint == nil {
+		return failure("bootstrap: missing endpoint", nil)
 	}
-	if selected == nil {
-		return failure("bootstrap: no enabled key", provider.ErrNoCandidate)
-	}
-	mapping, err := e.channels.GetModel(ctx, int64(ch.ID), req.Model)
-	if err != nil {
-		return failure("bootstrap: model mapping lookup failed", err)
-	}
-	if mapping == nil || mapping.UpstreamModel == "" {
-		return failure("bootstrap: invalid model mapping", nil)
-	}
-	key, err := secret.Decrypt(selected.ProviderKeyEnc, e.masterKey)
-	if err != nil {
-		return failure("bootstrap: key decryption failed", err)
-	}
-	if len(key) == 0 {
-		return failure("bootstrap: empty upstream key", nil)
-	}
-	endpoint := &provider.Endpoint{ChannelID: int64(ch.ID), Provider: ch.Provider, BaseURL: ch.BaseURL,
-		APIKey: string(key), Model: mapping.UpstreamModel}
 	var result proxy.ForwardResult
 	if req.Stream {
 		result, err = e.forwarder.Forward(ctx, w, func(openCtx context.Context) (provider.Stream, error) {

@@ -40,7 +40,11 @@ func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg con
 	if err != nil {
 		return err
 	}
-	executor, err := bootstrap.NewExecutor(models, channels, keys, upstream, proxy.NewForwarder(), masterKey,
+	businessPicker, err := channel.NewEndpointPicker(channels, keys, masterKey)
+	if err != nil {
+		return err
+	}
+	executor, err := bootstrap.NewExecutor(models, channels, businessPicker, upstream, proxy.NewForwarder(),
 		proxy.ForwardOptions{TTFBTimeout: cfg.TTFBTimeout, OverallTimeout: cfg.OverallTimeout}, logger)
 	if err != nil {
 		return err

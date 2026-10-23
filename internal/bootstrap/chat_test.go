@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gaigate/internal/access"
+	"gaigate/internal/channel"
 	"gaigate/internal/middleware"
 	"gaigate/internal/provider"
 	"gaigate/internal/proxy"
@@ -90,6 +91,14 @@ func (s *forwarderStub) ForwardNonStream(ctx context.Context, w http.ResponseWri
 	return s.chat(ctx, w, open, opts)
 }
 
+type endpointStub struct {
+	pick func(context.Context, *store.Channel, string) (*provider.Endpoint, error)
+}
+
+func (s *endpointStub) Pick(ctx context.Context, ch *store.Channel, model string) (*provider.Endpoint, error) {
+	return s.pick(ctx, ch, model)
+}
+
 type harness struct {
 	models    *modelStub
 	channels  *channelStub
@@ -97,6 +106,7 @@ type harness struct {
 	upstream  *providerStub
 	forwarder *forwarderStub
 	master    []byte
+	picker    channel.EndpointPicker
 	enc       []byte
 	logs      bytes.Buffer
 	opts      proxy.ForwardOptions
@@ -120,23 +130,25 @@ func newHarness(t *testing.T) *harness {
 	}, mapping: func(_ context.Context, id int64, name string) (*store.ChannelModel, error) {
 		return &store.ChannelModel{ChannelID: uint64(id), Model: name, UpstreamModel: "mapped"}, nil
 	}}
-	h.keys = &keyStub{list: func(context.Context, int64) ([]store.ChannelKey, error) {
+	h.keys = &keyStub{list: func(_ context.Context, id int64) ([]store.ChannelKey, error) {
 		return []store.ChannelKey{
 			{ID: 1, Status: store.ChannelKeyStatusRevoked, ProviderKeyEnc: []byte("bad")},
-			{ID: 7, Status: store.ChannelKeyStatusActive, ProviderKeyEnc: []byte("bad")},
-			{ID: 3, Status: store.ChannelKeyStatusActive, ProviderKeyEnc: h.enc},
+			{ID: 7, ChannelID: uint64(id), Weight: 1, Status: store.ChannelKeyStatusActive, ProviderKeyEnc: []byte("bad")},
+			{ID: 3, ChannelID: uint64(id), Weight: 1, Status: store.ChannelKeyStatusActive, ProviderKeyEnc: h.enc},
 		}, nil
 	}}
 	h.upstream = &providerStub{}
 	h.forwarder = &forwarderStub{chat: func(context.Context, http.ResponseWriter, proxy.ResponseOpener, proxy.ForwardOptions) (proxy.ForwardResult, error) {
 		return proxy.ForwardResult{Kind: proxy.ResultSuccess}, nil
 	}}
+	h.picker, err = channel.NewEndpointPicker(h.channels, h.keys, h.master)
+	require.NoError(t, err)
 	return h
 }
 
 func (h *harness) build(t *testing.T) access.ChatExecutor {
 	t.Helper()
-	e, err := NewExecutor(h.models, h.channels, h.keys, h.upstream, h.forwarder, h.master, h.opts, slog.New(slog.NewJSONHandler(&h.logs, nil)))
+	e, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, slog.New(slog.NewJSONHandler(&h.logs, nil)))
 	require.NoError(t, err)
 	return e
 }
@@ -322,17 +334,18 @@ func TestExecutorForwardResultClassificationAndPrivacy(t *testing.T) {
 func TestExecutorConstructionAndAllowAll(t *testing.T) {
 	h := newHarness(t)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	for _, test := range []struct {
-		master []byte
-		opts   proxy.ForwardOptions
-	}{{nil, h.opts}, {h.master, proxy.ForwardOptions{}}, {h.master, proxy.ForwardOptions{TTFBTimeout: time.Second, OverallTimeout: -1}}} {
-		_, err := NewExecutor(h.models, h.channels, h.keys, h.upstream, h.forwarder, test.master, test.opts, logger)
+	for _, opts := range []proxy.ForwardOptions{{}, {TTFBTimeout: time.Second, OverallTimeout: -1}} {
+		_, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, opts, logger)
 		require.Error(t, err)
 	}
-	_, err := NewExecutor((*modelStub)(nil), h.channels, h.keys, h.upstream, h.forwarder, h.master, h.opts, logger)
+	_, err := NewExecutor((*modelStub)(nil), h.channels, h.picker, h.upstream, h.forwarder, h.opts, logger)
 	require.Error(t, err)
-	_, err = NewExecutor(h.models, h.channels, h.keys, h.upstream, h.forwarder, h.master, h.opts, nil)
+	_, err = NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, nil)
 	require.Error(t, err)
+	for _, picker := range []channel.EndpointPicker{nil, (*endpointStub)(nil)} {
+		_, err = NewExecutor(h.models, h.channels, picker, h.upstream, h.forwarder, h.opts, logger)
+		require.Error(t, err)
+	}
 	e := h.build(t)
 	require.Error(t, e.Execute(context.Background(), httptest.NewRecorder(), nil, nil))
 	assert.Zero(t, h.models.calls)
@@ -340,4 +353,45 @@ func TestExecutorConstructionAndAllowAll(t *testing.T) {
 	cancel()
 	assert.NoError(t, (AllowAll{}).Precheck(ctx, nil), "B3 has no quota, limiter or identity side effects")
 	assert.False(t, strings.Contains(h.logs.String(), "fixture-upstream-credential"))
+}
+
+func TestExecutorInjectedPickerSingleAttemptAndSummary(t *testing.T) {
+	for _, cause := range []error{nil, provider.ErrNoCandidate, store.ErrNotFound, errors.New("private picker cause")} {
+		h := newHarness(t)
+		calls := 0
+		endpoint := &provider.Endpoint{ChannelID: 1, Provider: "openai", BaseURL: "http://fixture.invalid", APIKey: "fixture-upstream-credential", Model: "mapped"}
+		h.picker = &endpointStub{pick: func(ctx context.Context, ch *store.Channel, model string) (*provider.Endpoint, error) {
+			calls++
+			assert.Equal(t, 1, h.models.calls, "Resolve precedes picking")
+			assert.Equal(t, 1, h.channels.lists, "candidate lookup precedes picking")
+			assert.EqualValues(t, 1, ch.ID, "priority then ID choose one channel regardless of alias fallback or health display")
+			assert.Equal(t, "alias", model)
+			assert.EqualValues(t, 1, middleware.ChannelIDFromContext(ctx))
+			return endpoint, cause
+		}}
+		h.upstream.chat = func(_ context.Context, ep *provider.Endpoint, _ *provider.ChatRequest) (*provider.ChatResponse, *provider.Usage, error) {
+			assert.Same(t, endpoint, ep, "executor uses the injected endpoint unchanged")
+			return &provider.ChatResponse{Body: json.RawMessage(`{}`)}, nil, nil
+		}
+		h.forwarder.chat = func(ctx context.Context, _ http.ResponseWriter, open proxy.ResponseOpener, _ proxy.ForwardOptions) (proxy.ForwardResult, error) {
+			_, _, err := open(ctx)
+			return proxy.ForwardResult{Kind: proxy.ResultSuccess}, err
+		}
+		err := h.build(t).Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false))
+		if cause == nil {
+			require.NoError(t, err)
+			assert.Equal(t, 1, h.forwarder.calls)
+		} else {
+			assert.ErrorIs(t, err, cause)
+			assert.NotContains(t, err.Error(), "private")
+			assert.Zero(t, h.forwarder.calls)
+		}
+		assert.Equal(t, 1, calls, "no alternate picker/channel attempt")
+		assert.Empty(t, h.keys.channels, "executor no longer reads keys directly")
+		assert.Zero(t, h.channels.mappings, "executor no longer assembles mappings directly")
+	}
+	h := newHarness(t)
+	h.picker = &endpointStub{pick: func(context.Context, *store.Channel, string) (*provider.Endpoint, error) { return nil, nil }}
+	require.Error(t, h.build(t).Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false)))
+	assert.Zero(t, h.forwarder.calls)
 }
