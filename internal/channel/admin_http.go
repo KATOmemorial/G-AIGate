@@ -192,8 +192,9 @@ func withChannelID(handler func(*gin.Context, int64)) gin.HandlerFunc {
 
 func respond(c *gin.Context, status int, value any) {
 	if c.Request.Context().Err() != nil {
-		c.Abort()
-		return
+		// Abort alone still lets Gin commit its default success response.
+		// Unwind through the existing Recover to net/http without any write.
+		panic(http.ErrAbortHandler)
 	}
 	if status == http.StatusNoContent {
 		c.Status(status)
@@ -204,8 +205,7 @@ func respond(c *gin.Context, status int, value any) {
 
 func writeAdminEnvelope(c *gin.Context, status int, code, message string) {
 	if c.Request.Context().Err() != nil {
-		c.Abort()
-		return
+		panic(http.ErrAbortHandler)
 	}
 	requestID, _ := middleware.RequestIDFromContext(c.Request.Context())
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": "gaigate_error", "code": code}, "request_id": requestID})

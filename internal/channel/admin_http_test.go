@@ -341,7 +341,7 @@ func TestAdminHTTPErrorsAndCancellationAreSafe(t *testing.T) {
 	req.Header.Set("Authorization", "admin")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
-	httpRouter(s, tester).ServeHTTP(w, req)
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() { httpRouter(s, tester).ServeHTTP(w, req) })
 	assert.Empty(t, w.Body.String(), "parent cancellation must not append a response")
 }
 
