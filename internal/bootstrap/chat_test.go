@@ -100,6 +100,7 @@ func (s *endpointStub) Pick(ctx context.Context, ch *store.Channel, model string
 }
 
 type harness struct {
+	health    *healthRegistryStub
 	models    *modelStub
 	channels  *channelStub
 	keys      *keyStub
@@ -115,6 +116,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{master: bytes.Repeat([]byte{9}, 32), opts: proxy.ForwardOptions{TTFBTimeout: 100 * time.Millisecond, OverallTimeout: time.Second}}
+	h.health = &healthRegistryStub{}
 	var err error
 	h.enc, err = secret.Encrypt([]byte("fixture-upstream-credential"), h.master)
 	require.NoError(t, err)
@@ -148,7 +150,7 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) build(t *testing.T) access.ChatExecutor {
 	t.Helper()
-	e, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, slog.New(slog.NewJSONHandler(&h.logs, nil)))
+	e, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, slog.New(slog.NewJSONHandler(&h.logs, nil)))
 	require.NoError(t, err)
 	return e
 }
@@ -335,15 +337,15 @@ func TestExecutorConstructionAndAllowAll(t *testing.T) {
 	h := newHarness(t)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	for _, opts := range []proxy.ForwardOptions{{}, {TTFBTimeout: time.Second, OverallTimeout: -1}} {
-		_, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, opts, logger)
+		_, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, opts, h.health, 500*time.Millisecond, logger)
 		require.Error(t, err)
 	}
-	_, err := NewExecutor((*modelStub)(nil), h.channels, h.picker, h.upstream, h.forwarder, h.opts, logger)
+	_, err := NewExecutor((*modelStub)(nil), h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, logger)
 	require.Error(t, err)
-	_, err = NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, nil)
+	_, err = NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, nil)
 	require.Error(t, err)
 	for _, picker := range []channel.EndpointPicker{nil, (*endpointStub)(nil)} {
-		_, err = NewExecutor(h.models, h.channels, picker, h.upstream, h.forwarder, h.opts, logger)
+		_, err = NewExecutor(h.models, h.channels, picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, logger)
 		require.Error(t, err)
 	}
 	e := h.build(t)
@@ -353,6 +355,20 @@ func TestExecutorConstructionAndAllowAll(t *testing.T) {
 	cancel()
 	assert.NoError(t, (AllowAll{}).Precheck(ctx, nil), "B3 has no quota, limiter or identity side effects")
 	assert.False(t, strings.Contains(h.logs.String(), "fixture-upstream-credential"))
+}
+
+type healthRegistryStub struct {
+	available func(context.Context, int64) bool
+	report    func(context.Context, int64, bool)
+}
+
+func (s *healthRegistryStub) IsAvailable(ctx context.Context, id int64) bool {
+	return s.available == nil || s.available(ctx, id)
+}
+func (s *healthRegistryStub) ReportRequestResult(ctx context.Context, id int64, ok bool) {
+	if s.report != nil {
+		s.report(ctx, id, ok)
+	}
 }
 
 func TestExecutorInjectedPickerSingleAttemptAndSummary(t *testing.T) {

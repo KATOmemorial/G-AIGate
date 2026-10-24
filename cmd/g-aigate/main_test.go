@@ -198,17 +198,17 @@ func TestBuildDepsCloseOrderDrainRedisMySQL(t *testing.T) {
 			return nil
 		}
 	}
-	deps := buildDeps(rec("mysql"), rec("redis"), rec("usage-repo"))
+	deps := buildDeps(rec("mysql"), rec("redis"), rec("usage-repo"), rec("health"))
 
 	// 登记序（装配序）：mysql 在前、redis 居中、usage-repo 在后
-	assert.Equal(t, []string{"mysql", "redis", "usage-repo"},
-		[]string{deps[0].name, deps[1].name, deps[2].name})
+	assert.Equal(t, []string{"mysql", "redis", "usage-repo", "health"},
+		[]string{deps[0].name, deps[1].name, deps[2].name, deps[3].name})
 
 	var buf bytes.Buffer
 	shutdown(time.Second, srv, deps, newTestLogger(&buf))
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, []string{"usage-repo", "redis", "mysql"}, closed,
+	assert.Equal(t, []string{"health", "usage-repo", "redis", "mysql"}, closed,
 		"关闭逆序：先 drain 落账，再关 redis，最后关 mysql")
 }

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -157,7 +158,14 @@ func assembledGateway(t *testing.T, db *gorm.DB, master []byte, cfg config.Proxy
 		}()
 		c.Next()
 	})
-	require.NoError(t, registerGatewayRoutes(r, db, master, cfg, 5*time.Second, logger))
+	mr := miniredis.RunT(t)
+	client := store.NewRedis(store.RedisOptions{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	health, err := registerGatewayRoutes(r, db, master, cfg, testHealthConfig(), store.NewVersionedHealthState(client), logger)
+	require.NoError(t, err)
+	require.NoError(t, health.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, health.Close(context.Background())) })
+	waitHealthRound(t, logs)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return srv, stats
@@ -209,13 +217,16 @@ func TestGatewayAssemblySelectionErrorsAndAbort(t *testing.T) {
 	captured := make(chan map[string]json.RawMessage, 1)
 	const normal = `{"id":"fixture","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3},"extension":{"keep":true}}`
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := primaryCalls.Add(1)
 		var body map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 			w.WriteHeader(500)
 			return
 		}
+		if respondToFixtureHealthProbe(w, body) {
+			return
+		}
+		call := primaryCalls.Add(1)
 		if call == 1 {
 			captured <- body
 		}
@@ -265,9 +276,25 @@ func TestGatewayAssemblySelectionErrorsAndAbort(t *testing.T) {
 		}
 	}))
 	defer primary.Close()
-	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backupCalls.Add(1); w.WriteHeader(500) }))
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if respondToFixtureHealthProbe(w, body) {
+			return
+		}
+		backupCalls.Add(1)
+		w.WriteHeader(500)
+	}))
 	defer backup.Close()
-	tie := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { tieCalls.Add(1); w.WriteHeader(500) }))
+	tie := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if respondToFixtureHealthProbe(w, body) {
+			return
+		}
+		tieCalls.Add(1)
+		w.WriteHeader(500)
+	}))
 	defer tie.Close()
 	fallback := gatewayChannel(t, db, master, "fallback", "alias", "wrong-fallback", backup.URL, "upstream-backup", 5)
 	chosen := gatewayChannel(t, db, master, "primary", "alias", "upstream-mapped", primary.URL, "revoked-key", 10)
@@ -431,7 +458,8 @@ func TestGatewayAssemblyRejectsInvalidConfigurationBeforeRoutes(t *testing.T) {
 		logs := newGatewayLogs()
 		logger := newLogger(logs, "info")
 		r := newGatewayRouter(logger, &middleware.Probes{})
-		require.Error(t, registerGatewayRoutes(r, nil, tc.key, tc.cfg, 5*time.Second, logger))
+		_, err := registerGatewayRoutes(r, nil, tc.key, tc.cfg, testHealthConfig(), nil, logger)
+		require.Error(t, err)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest("GET", "/v1/models", nil))
 		assert.Equal(t, 404, w.Code)
@@ -439,6 +467,11 @@ func TestGatewayAssemblyRejectsInvalidConfigurationBeforeRoutes(t *testing.T) {
 		r.ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
 		assert.Equal(t, 200, w.Code)
 	}
+}
+
+func testHealthConfig() config.ChannelConfig {
+	return config.ChannelConfig{ProbeTimeout: 5 * time.Second, ProbeInterval: 30 * time.Second,
+		StateTimeout: 500 * time.Millisecond, ProbeConcurrency: 4, FailureThreshold: 5, DisableDuration: 60 * time.Second}
 }
 
 func TestGatewayOpenerBudgetsAndClientCancellation(t *testing.T) {
@@ -455,8 +488,13 @@ func TestGatewayOpenerBudgetsAndClientCancellation(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Consume the POST body before waiting: net/http can then observe peer
 		// closure while this header-delay fixture waits on the request context.
-		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+		var fields map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
 			t.Error("cannot consume upstream fixture request")
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		if respondToFixtureHealthProbe(w, fields) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -607,14 +645,17 @@ func TestGatewayConcurrentRequestsKeepInnerChannelSummaries(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var fields struct {
-			Model string `json:"model"`
-		}
+		var fields map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
 			t.Error(err)
 			return
 		}
-		entered <- fields.Model
+		if respondToFixtureHealthProbe(w, fields) {
+			return
+		}
+		var model string
+		_ = json.Unmarshal(fields["model"], &model)
+		entered <- model
 		<-release
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[]}`)
@@ -674,4 +715,31 @@ func TestGatewayConcurrentRequestsKeepInnerChannelSummaries(t *testing.T) {
 	assert.NotContains(t, logs.String(), rawB)
 	assert.NotContains(t, logs.String(), "channel-a-key")
 	assert.NotContains(t, logs.String(), "channel-b-key")
+}
+
+func isFixtureHealthProbe(fields map[string]json.RawMessage) bool {
+	return string(fields["max_tokens"]) == "1" && string(fields["stream"]) == "false" &&
+		strings.Contains(string(fields["messages"]), `"ping"`)
+}
+
+func respondToFixtureHealthProbe(w http.ResponseWriter, fields map[string]json.RawMessage) bool {
+	if !isFixtureHealthProbe(fields) {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"choices":[]}`)
+	return true
+}
+
+func waitHealthRound(t *testing.T, logs *gatewayLogs) {
+	t.Helper()
+	timer := time.NewTimer(8 * time.Second)
+	defer timer.Stop()
+	for !strings.Contains(logs.String(), `"msg":"health_probe_round_finished"`) {
+		select {
+		case <-logs.notify:
+		case <-timer.C:
+			t.Fatal("initial health round did not finish")
+		}
+	}
 }
