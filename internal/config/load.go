@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -104,6 +105,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("proxy.stream-buffer", 64)
 	v.SetDefault("channel.probe-interval", 30*time.Second)
 	v.SetDefault("channel.probe-timeout", 5*time.Second)
+	v.SetDefault("channel.probe-concurrency", 4)
+	v.SetDefault("channel.state-timeout", 500*time.Millisecond)
 	v.SetDefault("channel.failure-threshold", 5)
 	v.SetDefault("channel.disable-duration", 60*time.Second)
 	v.SetDefault("router.breaker-window", 60*time.Second)
@@ -153,8 +156,14 @@ func (c *Config) validate() error {
 	if c.Channel.ProbeTimeout < time.Millisecond {
 		errs = append(errs, "channel.probe_timeout: 须至少为1ms")
 	}
-	if c.Channel.FailureThreshold <= 0 {
-		errs = append(errs, fmt.Sprintf("channel.failure_threshold: 须大于 0，实际 %d", c.Channel.FailureThreshold))
+	if c.Channel.FailureThreshold <= 0 || c.Channel.FailureThreshold > math.MaxInt32 {
+		errs = append(errs, fmt.Sprintf("channel.failure_threshold: 须在1..MaxInt32，实际 %d", c.Channel.FailureThreshold))
+	}
+	if c.Channel.ProbeConcurrency < 1 || c.Channel.ProbeConcurrency > 64 {
+		errs = append(errs, "channel.probe_concurrency: 须在1..64")
+	}
+	if c.Channel.StateTimeout < time.Millisecond {
+		errs = append(errs, "channel.state_timeout: 须至少为1ms")
 	}
 	if c.Channel.DisableDuration <= 0 {
 		errs = append(errs, fmt.Sprintf("channel.disable_duration: 须大于 0，实际 %s", c.Channel.DisableDuration))

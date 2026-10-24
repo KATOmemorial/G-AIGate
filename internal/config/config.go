@@ -62,6 +62,8 @@ type ProxyConfig struct {
 
 // ChannelConfig 渠道健康（14 channel）。
 type ChannelConfig struct {
+	ProbeConcurrency int           `yaml:"probe-concurrency" mapstructure:"probe-concurrency"` // 默认4，1..64
+	StateTimeout     time.Duration `yaml:"state-timeout" mapstructure:"state-timeout"`         // 默认500ms，至少1ms
 	// 单次最小chat探测的总预算，默认5s（14.1）
 	ProbeTimeout time.Duration `yaml:"probe-timeout" mapstructure:"probe-timeout"`
 	// 探活间隔，默认 30s

@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -31,23 +30,40 @@ func newGatewayRouter(logger *slog.Logger, probes *middleware.Probes) *gin.Engin
 	return r
 }
 
-func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg config.ProxyConfig, probeTimeout time.Duration, logger *slog.Logger) error {
+func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg config.ProxyConfig,
+	healthCfg config.ChannelConfig, state store.VersionedHealthState, logger *slog.Logger) (channel.HealthService, error) {
 	cache := store.NewConfigCache(0) // Existing store default TTL and invalidation semantics.
 	models := store.NewModelRepo(db, cache)
 	channels := store.NewChannelRepo(db, cache)
 	keys := store.NewKeyRepo(db)
 	upstream, err := openai.New(&http.Client{}, cfg.StreamBuffer)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	businessPicker, err := channel.NewEndpointPicker(channels, keys, masterKey)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	picker, err := channel.NewProbePicker(channels, keys, masterKey)
+	if err != nil {
+		return nil, err
+	}
+	tester, err := channel.NewConnectivityTester(picker, upstream, healthCfg.ProbeTimeout)
+	if err != nil {
+		return nil, err
+	}
+	health, err := channel.NewHealthService(channels, keys, state, tester, channel.HealthOptions{
+		ProbeInterval: healthCfg.ProbeInterval, DisableDuration: healthCfg.DisableDuration,
+		ProbeTimeout: healthCfg.ProbeTimeout, StateTimeout: healthCfg.StateTimeout,
+		FailureThreshold: healthCfg.FailureThreshold, ProbeConcurrency: healthCfg.ProbeConcurrency,
+	}, logger)
+	if err != nil {
+		return nil, err
 	}
 	executor, err := bootstrap.NewExecutor(models, channels, businessPicker, upstream, proxy.NewForwarder(),
-		proxy.ForwardOptions{TTFBTimeout: cfg.TTFBTimeout, OverallTimeout: cfg.OverallTimeout}, logger)
+		proxy.ForwardOptions{TTFBTimeout: cfg.TTFBTimeout, OverallTimeout: cfg.OverallTimeout}, health, healthCfg.StateTimeout, logger)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	userKeys, users := store.NewAPIKeyRepo(db), store.NewUserRepo(db)
 	auth := access.AuthMiddleware(access.NewAuthenticator(userKeys, users))
@@ -56,20 +72,14 @@ func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg con
 	access.RegisterUserKeyRoutes(r, auth, access.NewKeyService(userKeys, users))
 	admin, err := channel.NewAdminService(channels, keys, models, cache, masterKey)
 	if err != nil {
-		return err
-	}
-	picker, err := channel.NewProbePicker(channels, keys, masterKey)
-	if err != nil {
-		return err
-	}
-	tester, err := channel.NewConnectivityTester(picker, upstream, probeTimeout)
-	if err != nil {
-		return err
+		return nil, err
 	}
 	// TODO(19.1): replace all management Bearer routes with session/CSRF identity.
-	channel.RegisterAdminRoutes(r, auth, func(ctx context.Context) bool {
+	isAdmin := func(ctx context.Context) bool {
 		p, ok := access.PrincipalFromContext(ctx)
 		return ok && p.Role == store.RoleAdmin
-	}, admin, tester)
-	return nil
+	}
+	channel.RegisterAdminRoutes(r, auth, isAdmin, admin, tester)
+	channel.RegisterHealthRoutes(r, auth, isAdmin, channels, health)
+	return health, nil
 }
