@@ -23,11 +23,11 @@ func newTestLogger(buf *bytes.Buffer) *slog.Logger {
 }
 
 // startTestServer 起一个真实 http.Server（随机端口），返回 server 与 base URL。
-func startTestServer(t *testing.T, h http.Handler) (*http.Server, string) {
+func startTestServer(t *testing.T, h http.Handler) (*ownedHTTPServer, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv := &http.Server{Handler: h}
+	srv := newHTTPServer("", h)
 	go func() { _ = srv.Serve(ln) }() // 测试内 goroutine：模拟服务主循环
 	t.Cleanup(func() { _ = srv.Close() })
 	return srv, "http://" + ln.Addr().String()

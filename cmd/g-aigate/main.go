@@ -9,7 +9,6 @@ import (
 	"flag"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -134,7 +133,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := &http.Server{Addr: cfg.Server.Addr, Handler: r}
+	srv := newHTTPServer(cfg.Server.Addr, r)
 
 	logger.Info("g-aigate 启动", "addr", cfg.Server.Addr)
 
@@ -149,7 +148,7 @@ func main() {
 	case err := <-serveErr:
 		// 未收到信号而退出：启动失败（如端口占用）
 		logger.Error("HTTP 服务异常退出", "err", err.Error())
-		closeDependencies(cfg.Server.ShutdownTimeout, deps, logger)
+		shutdown(cfg.Server.ShutdownTimeout, srv, deps, logger)
 		os.Exit(1)
 	case sig := <-quit:
 		// 10.2 §3：SIGTERM/SIGINT → 停止接受新请求 → 等待在途请求完成
@@ -187,7 +186,7 @@ func buildDeps(mysqlClose, redisClose, usageDrainClose, healthClose func(context
 // Shutdown 超时耗尽后若复用同一 ctx，落账 drain（11.3）会拿到已取消
 // context 即刻失败，与"先 drain 再关 DB"（10.2 §4 决策②）冲突。
 // 抽出为独立函数以便单测逆序与超时语义。
-func shutdown(timeout time.Duration, srv *http.Server, deps []dependency, logger *slog.Logger) {
+func shutdown(timeout time.Duration, srv *ownedHTTPServer, deps []dependency, logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -198,7 +197,14 @@ func shutdown(timeout time.Duration, srv *http.Server, deps []dependency, logger
 			logger.Error("HTTP 强制关闭失败")
 		}
 	}
-	closeDependencies(timeout, deps, logger)
+	// HTTP cancellation cleanup and all dependency closers share the original
+	// independent dependency-stage deadline. Joining handlers cannot restart it.
+	depCtx, depCancel := context.WithTimeout(context.Background(), timeout)
+	defer depCancel()
+	logger.InfoContext(depCtx, "http_handlers_draining")
+	srv.handlers.wait()
+	logger.InfoContext(depCtx, "http_handlers_stopped", "within_budget", depCtx.Err() == nil)
+	closeDependenciesWithContext(depCtx, deps, logger)
 	logger.Info("g-aigate 已退出")
 }
 
@@ -207,6 +213,10 @@ func closeDependencies(timeout time.Duration, deps []dependency, logger *slog.Lo
 	// 独立预算，不受 Shutdown 阶段是否超时影响
 	depCtx, depCancel := context.WithTimeout(context.Background(), timeout)
 	defer depCancel()
+	closeDependenciesWithContext(depCtx, deps, logger)
+}
+
+func closeDependenciesWithContext(depCtx context.Context, deps []dependency, logger *slog.Logger) {
 	for i := len(deps) - 1; i >= 0; i-- {
 		err := deps[i].close(depCtx)
 		if err != nil {
