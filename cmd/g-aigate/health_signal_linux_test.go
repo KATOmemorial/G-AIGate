@@ -65,9 +65,13 @@ func TestHealthProcess_RealRedisLinuxSIGTERMWithActiveHTTPAndProbe(t *testing.T)
 	require.GreaterOrEqual(t, elapsed, 280*time.Millisecond)
 	require.Less(t, elapsed, 2*time.Second, "HTTP budget plus independent dependency budget, no probe timeout wait")
 	entries := processLogEntries(t, p.logs)
-	stopped, healthClosed, redisClosed, mysqlClosed := -1, -1, -1, -1
+	httpStopped, stopped, healthClosed, redisClosed, mysqlClosed := -1, -1, -1, -1, -1
 	var stopTime time.Time
 	for i, entry := range entries {
+		if entry["msg"] == "http_handlers_stopped" {
+			httpStopped = i
+			require.Equal(t, true, entry["within_budget"])
+		}
 		if entry["msg"] == "health_service_stopped" {
 			stopped = i
 			stopTime, err = time.Parse(time.RFC3339Nano, entry["ts"].(string))
@@ -88,7 +92,8 @@ func TestHealthProcess_RealRedisLinuxSIGTERMWithActiveHTTPAndProbe(t *testing.T)
 			t.Error("dependency phase failed")
 		}
 	}
-	require.GreaterOrEqual(t, stopped, 0)
+	require.GreaterOrEqual(t, httpStopped, 0)
+	require.Greater(t, stopped, httpStopped)
 	require.Greater(t, healthClosed, stopped)
 	require.Greater(t, redisClosed, healthClosed)
 	require.Greater(t, mysqlClosed, redisClosed)
