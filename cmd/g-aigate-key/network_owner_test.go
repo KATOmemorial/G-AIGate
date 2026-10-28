@@ -33,7 +33,7 @@ func ownerTCPPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 	return client, server
 }
 
-func TestCommandNetworkOwnerJoinsWatcherBeforeSocketClose(t *testing.T) {
+func TestCommandNetworkOwnerJoinsStartedCancellationAfterSocketClose(t *testing.T) {
 	client, server := ownerTCPPair(t)
 	physical := ownerTestBase()
 	base := &ownerTestConnector{connect: func(context.Context) (driver.Conn, error) { return physical, nil }, closing: make(chan struct{})}
@@ -49,12 +49,22 @@ func TestCommandNetworkOwnerJoinsWatcherBeforeSocketClose(t *testing.T) {
 	// cancel watcher is held before invoking the actual raw TCP Close.
 	require.NoError(t, driverConn.Close())
 	assert.True(t, physical.closed.Load())
-	watcherGate, watcherDone, closeDone, peerDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	watcherGate, watcherEntered, closeDone, peerDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var gateOnce sync.Once
 	release := func() { gateOnce.Do(func() { close(watcherGate) }) }
 	var closeErr, watcherErr, peerErr error
 	go func() { defer close(peerDone); var b [1]byte; _, peerErr = server.Read(b[:]) }()
-	go func() { defer close(watcherDone); <-watcherGate; watcherErr = wrapped.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	callback, err := owner.cancelOnContext(ctx, func() {
+		close(watcherEntered)
+		<-watcherGate
+		watcherErr = wrapped.Close()
+	})
+	require.NoError(t, err)
+	cancel()
+	ownerWait(t, watcherEntered, "started cancellation callback")
+	watcherDone := callback.done
 	go func() { defer close(closeDone); closeErr = owner.Close() }()
 	defer func() {
 		release()
@@ -73,9 +83,10 @@ func TestCommandNetworkOwnerJoinsWatcherBeforeSocketClose(t *testing.T) {
 	assert.Nil(t, late)
 	assert.ErrorIs(t, err, errCommandPoolClosed)
 	owner.mu.Lock()
-	assert.Equal(t, 1, owner.networks)
+	assert.Zero(t, owner.networks)
 	assert.Zero(t, owner.connections)
 	owner.mu.Unlock()
+	ownerWait(t, peerDone, "Close proactively interrupted actual TCP")
 	release()
 	ownerWait(t, watcherDone, "actual socket close")
 	ownerWait(t, closeDone, "owner joins actual network")

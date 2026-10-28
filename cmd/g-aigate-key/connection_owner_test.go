@@ -123,6 +123,8 @@ func assertCommandOwnerClosed(t *testing.T, c *commandConnector) {
 	assert.True(t, c.closing)
 	assert.True(t, c.closed)
 	assert.Empty(t, c.connecting)
+	assert.Empty(t, c.callbacks)
+	assert.Empty(t, c.tcp)
 	assert.Zero(t, c.connections)
 	assert.Zero(t, c.networks)
 	assert.Equal(t, c.dialed, c.networkDone)
