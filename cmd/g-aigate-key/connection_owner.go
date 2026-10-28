@@ -48,10 +48,13 @@ type commandConnector struct {
 	closeErr    error
 	owners      sync.WaitGroup
 	closeOnce   sync.Once
+	tcp         map[*commandTCPConnection]struct{}
+	callbacks   map[*commandCancellation]struct{}
 }
 
 func newCommandConnector(connector driver.Connector) *commandConnector {
-	return &commandConnector{Connector: connector, connecting: make(map[uint64]context.CancelCauseFunc)}
+	return &commandConnector{Connector: connector, connecting: make(map[uint64]context.CancelCauseFunc),
+		tcp: make(map[*commandTCPConnection]struct{}), callbacks: make(map[*commandCancellation]struct{})}
 }
 
 func (c *commandConnector) beginCall(ctx context.Context) (context.Context, func(), error) {
@@ -85,6 +88,8 @@ func (c *commandConnector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, err
 	}
 	defer finish()
+	network := &commandConnectionNetwork{}
+	connectCtx = context.WithValue(connectCtx, commandConnectionNetworkKey{}, network)
 	conn, err := c.Connector.Connect(connectCtx)
 	if err != nil {
 		return nil, errors.Join(err, connectCtx.Err(), context.Cause(connectCtx))
@@ -108,7 +113,7 @@ func (c *commandConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	c.acquired++
 	c.owners.Add(1) // Connect's owner is still live, so Wait cannot cross zero
 	c.mu.Unlock()
-	return &commandDriverConnection{commandMySQLCapabilities: capabilities, owner: c}, nil
+	return &commandDriverConnection{commandMySQLCapabilities: capabilities, owner: c, network: network}, nil
 }
 
 func (c *commandConnector) recordCloseError(err error) {
@@ -121,20 +126,21 @@ func (c *commandConnector) recordCloseError(err error) {
 
 func (c *commandConnector) Close() error {
 	c.closeOnce.Do(func() {
-		c.mu.Lock()
-		c.closing = true
-		cancels := make([]context.CancelCauseFunc, 0, len(c.connecting))
-		for _, cancel := range c.connecting {
-			cancels = append(cancels, cancel)
-		}
-		c.mu.Unlock()
-		for _, cancel := range cancels {
-			cancel(errCommandPoolClosed)
-		}
+		connections := c.seal()
 		if closer, ok := c.Connector.(io.Closer); ok {
 			c.recordCloseError(closer.Close())
 		}
+		interruptCommandConnections(connections)
 		c.owners.Wait()
+		c.mu.Lock()
+		callbacks := make([]*commandCancellation, 0, len(c.callbacks))
+		for callback := range c.callbacks {
+			callbacks = append(callbacks, callback)
+		}
+		c.mu.Unlock()
+		for _, callback := range callbacks {
+			callback.join()
+		}
 		if c.unregister != nil {
 			c.unregister() // no Dial/Connect/connection owner can still use this name
 		}
@@ -152,6 +158,7 @@ type commandDriverConnection struct {
 	owner     *commandConnector
 	closeOnce sync.Once
 	closeErr  error
+	network   *commandConnectionNetwork
 }
 
 func (c *commandDriverConnection) Close() error {

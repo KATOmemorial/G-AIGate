@@ -47,6 +47,9 @@ func openMySQLWithOwner(ctx context.Context, opts store.Options) (*gorm.DB, *com
 	}
 	cfg.Logger = silentDriverLogger{}
 	owner := newCommandConnector(nil)
+	if _, err := owner.cancelOnContext(ctx, owner.interrupt); err != nil {
+		return nil, owner, fmt.Errorf("command: bind lifecycle: %w", err)
+	}
 	owner.registerTCP(cfg)
 	connector, err := driver.NewConnector(cfg)
 	if err != nil {

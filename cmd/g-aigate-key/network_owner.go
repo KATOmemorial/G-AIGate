@@ -54,15 +54,22 @@ func (c *commandConnector) dialTCP(ctx context.Context, network, addr string,
 	}
 	c.networks++
 	c.dialed++
+	owned := &commandTCPConnection{TCPConn: tcp, owner: c}
+	c.tcp[owned] = struct{}{}
 	c.owners.Add(1) // Dial's registered owner prevents a zero-count Add/Wait race
 	c.mu.Unlock()
+	if network, ok := ctx.Value(commandConnectionNetworkKey{}).(*commandConnectionNetwork); ok {
+		network.mu.Lock()
+		network.tcp = owned
+		network.mu.Unlock()
+	}
 	// The driver's *net.TCPConn assertion cannot see through the wrapper. Keep
 	// its original keepalive operation explicitly; syscall.Conn and deadlines
 	// remain available through the embedded TCPConn (including Linux connCheck).
 	if err := tcp.SetKeepAlive(true); err != nil {
 		logger.Print(err)
 	}
-	return &commandTCPConnection{TCPConn: tcp, owner: c}, nil
+	return owned, nil
 }
 
 type commandTCPConnection struct {
@@ -79,6 +86,7 @@ func (c *commandTCPConnection) Close() error {
 		c.owner.closeErr = errors.Join(c.owner.closeErr, c.closeErr)
 		c.owner.networks--
 		c.owner.networkDone++
+		delete(c.owner.tcp, c)
 		c.owner.mu.Unlock()
 		c.owner.owners.Done() // mysql's closed flag can precede this actual close
 	})
