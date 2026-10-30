@@ -23,11 +23,11 @@ func newTestLogger(buf *bytes.Buffer) *slog.Logger {
 }
 
 // startTestServer 起一个真实 http.Server（随机端口），返回 server 与 base URL。
-func startTestServer(t *testing.T, h http.Handler) (*http.Server, string) {
+func startTestServer(t *testing.T, h http.Handler) (*ownedHTTPServer, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv := &http.Server{Handler: h}
+	srv := newHTTPServer("", h)
 	go func() { _ = srv.Serve(ln) }() // 测试内 goroutine：模拟服务主循环
 	t.Cleanup(func() { _ = srv.Close() })
 	return srv, "http://" + ln.Addr().String()
@@ -198,17 +198,17 @@ func TestBuildDepsCloseOrderDrainRedisMySQL(t *testing.T) {
 			return nil
 		}
 	}
-	deps := buildDeps(rec("mysql"), rec("redis"), rec("usage-repo"))
+	deps := buildDeps(rec("mysql"), rec("redis"), rec("usage-repo"), rec("health"))
 
 	// 登记序（装配序）：mysql 在前、redis 居中、usage-repo 在后
-	assert.Equal(t, []string{"mysql", "redis", "usage-repo"},
-		[]string{deps[0].name, deps[1].name, deps[2].name})
+	assert.Equal(t, []string{"mysql", "redis", "usage-repo", "health"},
+		[]string{deps[0].name, deps[1].name, deps[2].name, deps[3].name})
 
 	var buf bytes.Buffer
 	shutdown(time.Second, srv, deps, newTestLogger(&buf))
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, []string{"usage-repo", "redis", "mysql"}, closed,
+	assert.Equal(t, []string{"health", "usage-repo", "redis", "mysql"}, closed,
 		"关闭逆序：先 drain 落账，再关 redis，最后关 mysql")
 }

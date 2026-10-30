@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"sort"
+	"time"
 
 	"gaigate/internal/access"
 	"gaigate/internal/channel"
@@ -24,30 +26,32 @@ type AllowAll struct{}
 func (AllowAll) Precheck(context.Context, *access.Principal) error { return nil }
 
 type executor struct {
-	models    store.ModelRepo
-	channels  store.ChannelRepo
-	picker    channel.EndpointPicker
-	upstream  provider.Provider
-	forwarder proxy.Forwarder
-	opts      proxy.ForwardOptions
-	logger    *slog.Logger
+	models       store.ModelRepo
+	channels     store.ChannelRepo
+	picker       channel.EndpointPicker
+	upstream     provider.Provider
+	forwarder    proxy.Forwarder
+	opts         proxy.ForwardOptions
+	logger       *slog.Logger
+	health       channel.HealthRegistry
+	stateTimeout time.Duration
 }
 
 // NewExecutor receives the endpoint picker and proxy options from assembly.
 // Endpoint selection, model mapping and decryption belong to channel (14.2).
 func NewExecutor(models store.ModelRepo, channels store.ChannelRepo, picker channel.EndpointPicker,
 	upstream provider.Provider, forwarder proxy.Forwarder,
-	opts proxy.ForwardOptions, logger *slog.Logger) (access.ChatExecutor, error) {
-	for _, dependency := range []any{models, channels, picker, upstream, forwarder, logger} {
+	opts proxy.ForwardOptions, health channel.HealthRegistry, stateTimeout time.Duration, logger *slog.Logger) (access.ChatExecutor, error) {
+	for _, dependency := range []any{models, channels, picker, upstream, forwarder, health, logger} {
 		if nilDependency(dependency) {
 			return nil, errors.New("bootstrap: missing dependency")
 		}
 	}
-	if opts.TTFBTimeout <= 0 || opts.OverallTimeout <= 0 {
+	if opts.TTFBTimeout <= 0 || opts.OverallTimeout <= 0 || stateTimeout < time.Millisecond {
 		return nil, errors.New("bootstrap: invalid forwarding options")
 	}
 	return &executor{models: models, channels: channels, picker: picker, upstream: upstream,
-		forwarder: forwarder, opts: opts, logger: logger}, nil
+		forwarder: forwarder, opts: opts, health: health, stateTimeout: stateTimeout, logger: logger}, nil
 }
 
 type stageError struct {
@@ -82,11 +86,20 @@ func (e *executor) Execute(ctx context.Context, w http.ResponseWriter, _ *access
 	}
 	// TODO(16.1): replace priority/id selection with routing (台账#21).
 	// TODO(16.4): replace this single attempt; B3 never retries/falls back (台账#21).
-	ch := channels[0]
-	for _, candidate := range channels[1:] {
-		if candidate.Priority > ch.Priority || candidate.Priority == ch.Priority && candidate.ID < ch.ID {
+	// Sort a private slice: health is a pre-attempt filter, never a retry path.
+	channels = append([]store.Channel(nil), channels...)
+	sort.Slice(channels, func(i, j int) bool {
+		return channels[i].Priority > channels[j].Priority || channels[i].Priority == channels[j].Priority && channels[i].ID < channels[j].ID
+	})
+	var ch store.Channel
+	for _, candidate := range channels {
+		if candidate.Enabled && candidate.ID > 0 && candidate.ID <= math.MaxInt64 && e.health.IsAvailable(ctx, int64(candidate.ID)) {
 			ch = candidate
+			break
 		}
+	}
+	if ch.ID == 0 {
+		return failure("bootstrap: no healthy channel", provider.ErrNoCandidate)
 	}
 	if ch.ID == 0 || ch.ID > math.MaxInt64 || ch.Provider != e.upstream.Name() {
 		return failure("bootstrap: invalid channel configuration", nil)
@@ -100,12 +113,15 @@ func (e *executor) Execute(ctx context.Context, w http.ResponseWriter, _ *access
 		return failure("bootstrap: missing endpoint", nil)
 	}
 	var result proxy.ForwardResult
+	attempted := false
 	if req.Stream {
 		result, err = e.forwarder.Forward(ctx, w, func(openCtx context.Context) (provider.Stream, error) {
+			attempted = true
 			return e.upstream.ChatStream(openCtx, endpoint, req)
 		}, e.opts, nil)
 	} else {
 		result, err = e.forwarder.ForwardNonStream(ctx, w, func(openCtx context.Context) (*provider.ChatResponse, *provider.Usage, error) {
+			attempted = true
 			return e.upstream.Chat(openCtx, endpoint, req)
 		}, e.opts)
 	}
@@ -118,11 +134,38 @@ func (e *executor) Execute(ctx context.Context, w http.ResponseWriter, _ *access
 	e.logger.Log(ctx, level, "upstream attempt finished", "request_id", requestID, "channel_id", endpoint.ChannelID,
 		"result_kind", safeKind(result.Kind), "wrote_header", result.WroteHeader,
 		"first_byte_ms", result.FirstByteMs, "chunks", result.Chunks)
+	if ok, report := healthSignal(result.Kind, err); attempted && report {
+		// Preserve request values but do not let the spent upstream/client budget
+		// swallow a valid signal. This synchronous cleanup has its own hard bound.
+		reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stateTimeout)
+		start := time.Now()
+		e.health.ReportRequestResult(reportCtx, endpoint.ChannelID, ok)
+		cancel()
+		e.logger.InfoContext(ctx, "health result reported", "request_id", requestID, "channel_id", endpoint.ChannelID,
+			"health_report_ms", time.Since(start).Milliseconds())
+	}
 	if err != nil {
 		return &access.ExecutionError{Cause: err, WroteHeader: result.WroteHeader,
 			TimedOut: result.Kind == proxy.ResultTTFBTimeout || result.Kind == proxy.ResultOverallTimeout}
 	}
 	return nil
+}
+
+func healthSignal(kind proxy.ResultKind, err error) (ok, report bool) {
+	switch kind {
+	case proxy.ResultSuccess:
+		return true, true
+	case proxy.ResultStreamInterrupted, proxy.ResultTTFBTimeout, proxy.ResultOverallTimeout:
+		return false, true
+	case proxy.ResultUpstreamError:
+		var upstream *provider.UpstreamError
+		if errors.As(err, &upstream) && (upstream.StatusCode == 400 || upstream.StatusCode == 404 || upstream.StatusCode == 422) {
+			return false, false
+		}
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func safeKind(kind proxy.ResultKind) string {

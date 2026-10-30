@@ -33,19 +33,32 @@ type silentDriverLogger struct{}
 func (silentDriverLogger) Print(...any) {}
 
 func openMySQL(ctx context.Context, opts store.Options) (*gorm.DB, error) {
+	db, _, err := openMySQLWithOwner(ctx, opts)
+	return db, err
+}
+
+func openMySQLWithOwner(ctx context.Context, opts store.Options) (*gorm.DB, *commandConnector, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("command: initialize MySQL: %w", errors.Join(err, context.Cause(ctx)))
+		return nil, nil, fmt.Errorf("command: initialize MySQL: %w", errors.Join(err, context.Cause(ctx)))
 	}
 	cfg, err := driver.ParseDSN(opts.DSN())
 	if err != nil {
-		return nil, fmt.Errorf("command: parse MySQL configuration: %w", err)
+		return nil, nil, fmt.Errorf("command: parse MySQL configuration: %w", err)
 	}
 	cfg.Logger = silentDriverLogger{}
+	owner := newCommandConnector(nil)
+	if _, err := owner.cancelOnContext(ctx, owner.interrupt); err != nil {
+		return nil, owner, fmt.Errorf("command: bind lifecycle: %w", err)
+	}
+	owner.registerTCP(cfg)
 	connector, err := driver.NewConnector(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("command: create MySQL connector: %w", err)
+		closeErr := owner.Close()
+		return nil, owner, fmt.Errorf("command: create MySQL connector: %w", errors.Join(err, closeErr))
 	}
-	return initializeMySQL(ctx, sql.OpenDB(connector))
+	owner.Connector = connector
+	db, err := initializeMySQL(ctx, sql.OpenDB(owner))
+	return db, owner, err
 }
 
 // Own the lazy pool from entry, including all version-query and ping failures.

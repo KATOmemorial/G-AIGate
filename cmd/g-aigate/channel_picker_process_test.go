@@ -106,6 +106,7 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 	t.Run("three to one and manual probes preserve position", func(t *testing.T) {
 		setKey(t, 0, 3, 1)
 		pick(t, "A")
+		beforeHealth := f.healthRecord(t, created.ID)
 		for range 2 {
 			_, data := request(t, admin.Key, "POST", path+"/test", map[string]string{"model": "gpt-4o-demo"}, 200)
 			expectedMainCalls++
@@ -113,6 +114,7 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 			require.NoError(t, json.Unmarshal(data, &result))
 			assert.True(t, result.OK)
 		}
+		assert.Equal(t, beforeHealth, f.healthRecord(t, created.ID), "manual diagnostics do not feed health")
 		for _, expected := range []string{"A", "B", "A"} {
 			pick(t, expected)
 		}
@@ -156,10 +158,13 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 		configure(t, keyA, "normal", 4)
 		pick(t, "A")
 	})
-	assert.Empty(t, f.redis.Keys(), "no health or distributed SWRR state")
+	for _, key := range f.redis.Keys() {
+		assert.True(t, strings.HasPrefix(key, "gaigate:health:"), "SWRR must not create distributed state")
+	}
 	// Join every process before counting complete upstream logs or scanning secrets.
 	gateway.stop(t)
 	f.mock.stop(t)
+	assert.Equal(t, 1, strings.Count(gateway.logs.String(), `"msg":"health_probe_round_finished"`), "new channels were created after the completed initial round; exact SWRR counts must not include another background round")
 	actualMain, actualBackup := 0, 0
 	for _, entry := range processLogEntries(t, f.mock.logs) {
 		if entry["msg"] != "request_done" {

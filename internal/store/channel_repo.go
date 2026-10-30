@@ -17,6 +17,8 @@ type ChannelRepo interface {
 	List(ctx context.Context) ([]Channel, error)
 	ListModels(ctx context.Context, channelID int64) ([]ChannelModel, error)
 	UpdateConfig(ctx context.Context, ch *Channel, models []ChannelModel) error
+	// UpdateHealthView mirrors Redis state without changing management columns.
+	UpdateHealthView(ctx context.Context, channelID int64, status string, lastCheckedAt *time.Time) error
 	// GetModel reads one channel/model mapping without caching (13.3).
 	// A missing pair wraps ErrNotFound; other SQL errors retain their cause.
 	GetModel(ctx context.Context, channelID int64, model string) (*ChannelModel, error)
@@ -250,4 +252,23 @@ func (r *channelRepo) UpdateConfig(ctx context.Context, ch *Channel, models []Ch
 		}
 		return nil
 	})
+}
+
+func (r *channelRepo) UpdateHealthView(ctx context.Context, channelID int64, status string, lastCheckedAt *time.Time) error {
+	if channelID <= 0 || (status != "unknown" && status != "healthy" && status != "disabled" && status != "cooling") {
+		return errors.New("store: invalid health view")
+	}
+	// UpdateColumns deliberately bypasses GORM's updated_at callback. No stale
+	// Channel model is saved, so concurrent management edits cannot be reverted.
+	result := r.db.WithContext(ctx).Model(&Channel{}).Where("id = ?", channelID).
+		UpdateColumns(map[string]any{"health_status": status, "last_checked_at": lastCheckedAt})
+	if result.Error != nil {
+		return fmt.Errorf("store: update channel health view: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := r.Get(ctx, channelID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

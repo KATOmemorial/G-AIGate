@@ -249,6 +249,7 @@ func (f *gatewayProcessFixture) startGatewayWithProbeTimeout(t *testing.T, ttfb,
 	resp, _, readErr := gatewayRequest(t, f.client, base, "", "GET", "/readyz", "")
 	require.NoError(t, readErr)
 	assert.Equal(t, 200, resp.StatusCode)
+	waitHealthRound(t, p.logs)
 	return p, base
 }
 
@@ -285,6 +286,17 @@ func processLogEntries(t *testing.T, logs *gatewayLogs) []map[string]any {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+func (f *gatewayProcessFixture) healthRecord(t *testing.T, id int64) store.HealthRecord {
+	t.Helper()
+	client := store.NewRedis(store.RedisOptions{Addr: f.redis.Addr()})
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	record, err := store.NewVersionedHealthState(client).LoadVersioned(ctx, id)
+	require.NoError(t, err)
+	return record
 }
 
 func waitProcessLog(t *testing.T, logs *gatewayLogs, offset int, match func(map[string]any) bool) map[string]any {

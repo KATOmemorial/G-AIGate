@@ -408,6 +408,29 @@ func TestPrivateInitializerRealVersionTransactionsAndCallerContexts(t *testing.T
 	assert.ErrorIs(t, context.Cause(independent), cause)
 	require.NoError(t, db.WithContext(ctx).Raw("SELECT 1").Scan(&value).Error)
 	assert.Equal(t, 1, value)
+	// Confirm server entry before independently canceling this caller. Polling
+	// here establishes SQL entry, never resource-close completion.
+	activeCaller, activeCancel := context.WithCancelCause(context.Background())
+	activeDone := make(chan struct{})
+	var activeErr error
+	activeSQL := "SELECT /* cli134-independent-cancel */ SLEEP(3)"
+	go func() {
+		defer close(activeDone)
+		activeErr = db.WithContext(activeCaller).Raw(activeSQL).Scan(&value).Error
+	}()
+	defer func() { activeCancel(nil); ownerWait(t, activeDone, "independent SQL caller joined") }()
+	require.Eventually(t, func() bool {
+		var entered int64
+		err := fixture.Raw("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO = ?", activeSQL).Scan(&entered).Error
+		return err == nil && entered > 0
+	}, time.Second, 10*time.Millisecond, "independent SQL must actually enter server before cancellation")
+	activeCause := fmt.Errorf("independent in-flight caller cancellation")
+	activeCancel(activeCause)
+	ownerWait(t, activeDone, "in-flight caller cancellation")
+	assert.ErrorIs(t, activeErr, context.Canceled)
+	assert.ErrorIs(t, context.Cause(activeCaller), activeCause)
+	require.NoError(t, ctx.Err())
+	require.NoError(t, db.WithContext(ctx).Raw("SELECT 1").Scan(&value).Error)
 	require.NoError(t, pool.Close())
 	assert.Zero(t, pool.Stats().OpenConnections)
 	assert.Error(t, pool.PingContext(ctx))
@@ -422,13 +445,15 @@ func TestCommandRealSQLCancellationAndOutputFailure(t *testing.T) {
 	for _, stage := range []string{"users", "api_keys", "output"} {
 		t.Run(stage, func(t *testing.T) {
 			var actualPool *sql.DB
+			var actualOwner *commandConnector
 			entered := make(chan struct{}, 1)
 			deps := commandDeps{load: configLoader, open: func(ctx context.Context, opts store.Options) (*keyDatabase, error) {
-				actual, err := openMySQL(ctx, opts)
+				actual, connectionOwner, err := openMySQLWithOwner(ctx, opts)
 				if err != nil {
 					return nil, err
 				}
 				actualPool, err = actual.DB()
+				actualOwner = connectionOwner
 				require.NoError(t, err)
 				observe := func(tx *gorm.DB) {
 					if tx.Statement.Table == stage {
@@ -473,7 +498,7 @@ func TestCommandRealSQLCancellationAndOutputFailure(t *testing.T) {
 			assert.Equal(t, 1, code)
 			assert.Empty(t, out.String())
 			require.NotNil(t, actualPool)
-			assert.Zero(t, actualPool.Stats().OpenConnections)
+			assertCommandOwnerClosed(t, actualOwner)
 			assert.Error(t, actualPool.PingContext(context.Background()))
 			if stage != "output" {
 				select {
@@ -497,4 +522,38 @@ func TestCommandRealSQLCancellationAndOutputFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrivateMySQLNetworkOwnersAreIndependentAndUnregistered(t *testing.T) {
+	fixture, opts := commandTestDB(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	first, firstOwner, err := openMySQLWithOwner(ctx, opts)
+	require.NoError(t, err)
+	firstPool, err := first.DB()
+	require.NoError(t, err)
+	defer firstPool.Close()
+	second, secondOwner, err := openMySQLWithOwner(ctx, opts)
+	require.NoError(t, err)
+	secondPool, err := second.DB()
+	require.NoError(t, err)
+	defer secondPool.Close()
+	assert.NotEqual(t, firstOwner.networkName, secondOwner.networkName)
+	require.NoError(t, firstPool.Close())
+	assertCommandOwnerClosed(t, firstOwner)
+	assertCommandNetworkUnregistered(t, firstOwner)
+	var value int
+	require.NoError(t, second.WithContext(ctx).Raw("SELECT 1").Scan(&value).Error)
+	assert.Equal(t, 1, value)
+	require.NoError(t, fixture.WithContext(ctx).Raw("SELECT 1").Scan(&value).Error)
+	// A fresh default store connection also proves tcp was never replaced.
+	standard, err := store.Open(opts)
+	require.NoError(t, err)
+	standardPool, err := standard.DB()
+	require.NoError(t, err)
+	defer standardPool.Close()
+	require.NoError(t, standard.WithContext(ctx).Raw("SELECT 1").Scan(&value).Error)
+	require.NoError(t, secondPool.Close())
+	assertCommandOwnerClosed(t, secondOwner)
+	assertCommandNetworkUnregistered(t, secondOwner)
 }

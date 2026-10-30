@@ -63,6 +63,12 @@ func (p *probePicker) Pick(ctx context.Context, ch *store.Channel, model string)
 	if err := validateEndpointChannel(ch, model); err != nil {
 		return nil, err
 	}
+	if pinned, ok := ctx.Value(healthProbeContextKey{}).(*healthProbeCall); ok {
+		if pinned.config.channel.ID != ch.ID || pinned.config.mapping.Model != model {
+			return nil, failure("probe configuration mismatch", nil)
+		}
+		return assembleEndpoint(ctx, &pinned.config.channel, &pinned.config.mapping, &pinned.config.key, p.masterKey)
+	}
 	keys, err := p.keys.ListByChannel(ctx, int64(ch.ID))
 	if err != nil {
 		return nil, failure("probe Key lookup failed", err)
@@ -120,8 +126,12 @@ func (t *connectivityTester) Test(parent context.Context, ch *store.Channel, mod
 		Messages: []json.RawMessage{json.RawMessage(`{"role":"user","content":"ping"}`)},
 		Extra:    map[string]json.RawMessage{"max_tokens": json.RawMessage("1")}}
 	response, _, err := t.upstream.Chat(ctx, ep, request)
-	if parent.Err() != nil {
-		return ProbeResult{}, failure("probe parent canceled", errors.Join(parent.Err(), err))
+	owner := parent
+	if pinned, ok := parent.Value(healthProbeContextKey{}).(*healthProbeCall); ok {
+		owner = pinned.owner
+	}
+	if owner.Err() != nil {
+		return ProbeResult{}, failure("probe parent canceled", errors.Join(owner.Err(), err))
 	}
 	result := ProbeResult{LatencyMS: time.Since(start).Milliseconds(), Reason: "upstream_error"}
 	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {

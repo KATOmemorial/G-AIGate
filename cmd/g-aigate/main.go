@@ -9,7 +9,6 @@ import (
 	"flag"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -80,6 +79,7 @@ func main() {
 	// 理论不可达，防御性退出
 	masterKey, err := base64.StdEncoding.DecodeString(cfg.Secret.MasterKey)
 	if err != nil {
+		_ = sqlDB.Close()
 		logger.Error("master key 解码失败", "err", err.Error())
 		os.Exit(1)
 	}
@@ -88,11 +88,8 @@ func main() {
 		AdminPassword: os.Getenv("GAIGATE_ADMIN_PASSWORD"),
 		MasterKey:     masterKey,
 	}); err != nil {
+		_ = sqlDB.Close()
 		logger.Error("seed 失败", "err", err.Error())
-		os.Exit(1)
-	}
-	if err := registerGatewayRoutes(r, db, masterKey, cfg.Proxy, cfg.Channel.ProbeTimeout, logger); err != nil {
-		logger.Error("网关路由装配失败")
 		os.Exit(1)
 	}
 
@@ -110,10 +107,17 @@ func main() {
 
 	// readyz 注册 Redis ping（同 mysql：check 自带超时，防挂起拖住 /readyz）
 	probes.Register("redis", redisReadinessCheck(redisClient))
+	health, err := registerGatewayRoutes(r, db, masterKey, cfg.Proxy, cfg.Channel, store.NewVersionedHealthState(redisClient), logger)
+	if err != nil {
+		_ = redisClient.Close()
+		_ = sqlDB.Close()
+		logger.Error("网关路由装配失败")
+		os.Exit(1)
+	}
 
 	// 落账队列装配（11.3 §3）：Record 供 meter（17）经内存队列异步落库，
 	// 队列容量取 MeterConfig.SettleQueueSize（默认 1024）。worker 随装配启动；
-	// Close 由关闭序列第一步 drain（见 buildDeps）。
+	// Close 在健康任务全部退出之后 drain（见 buildDeps）。
 	usageRepo := store.NewUsageRepo(db, cfg.Meter.SettleQueueSize)
 
 	// 优雅关闭依赖列表：按装配顺序登记，逆序关闭（10.2 §3）。
@@ -121,9 +125,15 @@ func main() {
 		func(ctx context.Context) error { return sqlDB.Close() },
 		func(ctx context.Context) error { return redisClient.Close() },
 		usageRepo.Close,
+		health.Close,
 	)
+	if err := health.Start(context.Background()); err != nil {
+		closeDependencies(cfg.Server.ShutdownTimeout, deps, logger)
+		logger.Error("健康任务启动失败")
+		os.Exit(1)
+	}
 
-	srv := &http.Server{Addr: cfg.Server.Addr, Handler: r}
+	srv := newHTTPServer(cfg.Server.Addr, r)
 
 	logger.Info("g-aigate 启动", "addr", cfg.Server.Addr)
 
@@ -138,6 +148,7 @@ func main() {
 	case err := <-serveErr:
 		// 未收到信号而退出：启动失败（如端口占用）
 		logger.Error("HTTP 服务异常退出", "err", err.Error())
+		shutdown(cfg.Server.ShutdownTimeout, srv, deps, logger)
 		os.Exit(1)
 	case sig := <-quit:
 		// 10.2 §3：SIGTERM/SIGINT → 停止接受新请求 → 等待在途请求完成
@@ -157,17 +168,15 @@ func redisReadinessCheck(client *redis.Client) func(context.Context) error {
 }
 
 // buildDeps 按装配顺序登记优雅关闭依赖（10.2 §3：登记后逆序关闭）。
-// 顺序契约（台账 #16）：登记序为 mysql → redis → usage-repo，关闭时逆序
-// 执行 usage-repo(drain) → redis → mysql，保证先 drain 落账队列、再关 Redis、
-// 最后关 DB 连接，否则队列中未落库记录丢失（10.2 §3.2 / 11.3 §3）。
-// 11.4 已按此落位（原 TODO(11.4) 消解；redis 注册在 mysql 与 usage-repo 之间，
-// 非追加到末尾）。
+// 14.3 extends the existing drain → Redis → MySQL order with health first:
+// cancel and join all health owners before any of their stores can close.
 // 抽出为独立函数以便单测关闭顺序（同 10.2 §9 对 shutdown 的处置）。
-func buildDeps(mysqlClose, redisClose, usageDrainClose func(context.Context) error) []dependency {
+func buildDeps(mysqlClose, redisClose, usageDrainClose, healthClose func(context.Context) error) []dependency {
 	return []dependency{
 		{name: "mysql", close: mysqlClose},
 		{name: "redis", close: redisClose},
 		{name: "usage-repo", close: usageDrainClose},
+		{name: "health", close: healthClose},
 	}
 }
 
@@ -177,22 +186,44 @@ func buildDeps(mysqlClose, redisClose, usageDrainClose func(context.Context) err
 // Shutdown 超时耗尽后若复用同一 ctx，落账 drain（11.3）会拿到已取消
 // context 即刻失败，与"先 drain 再关 DB"（10.2 §4 决策②）冲突。
 // 抽出为独立函数以便单测逆序与超时语义。
-func shutdown(timeout time.Duration, srv *http.Server, deps []dependency, logger *slog.Logger) {
+func shutdown(timeout time.Duration, srv *ownedHTTPServer, deps []dependency, logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("优雅关闭超时/出错，在途请求被截断", "err", err.Error())
+		// Shutdown alone leaves active connections running after its deadline.
+		// Close cancels those requests before dependency teardown begins.
+		if err := srv.Close(); err != nil {
+			logger.Error("HTTP 强制关闭失败")
+		}
 	}
-	// 逆序关闭：后装配的先关（落账 drain → redis → mysql）；
+	// HTTP cancellation cleanup and all dependency closers share the original
+	// independent dependency-stage deadline. Joining handlers cannot restart it.
+	depCtx, depCancel := context.WithTimeout(context.Background(), timeout)
+	defer depCancel()
+	logger.InfoContext(depCtx, "http_handlers_draining")
+	srv.handlers.wait()
+	logger.InfoContext(depCtx, "http_handlers_stopped", "within_budget", depCtx.Err() == nil)
+	closeDependenciesWithContext(depCtx, deps, logger)
+	logger.Info("g-aigate 已退出")
+}
+
+func closeDependencies(timeout time.Duration, deps []dependency, logger *slog.Logger) {
+	// 逆序关闭：健康取消等待 → 落账 drain → redis → mysql；
 	// 独立预算，不受 Shutdown 阶段是否超时影响
 	depCtx, depCancel := context.WithTimeout(context.Background(), timeout)
 	defer depCancel()
+	closeDependenciesWithContext(depCtx, deps, logger)
+}
+
+func closeDependenciesWithContext(depCtx context.Context, deps []dependency, logger *slog.Logger) {
 	for i := len(deps) - 1; i >= 0; i-- {
-		if err := deps[i].close(depCtx); err != nil {
+		err := deps[i].close(depCtx)
+		if err != nil {
 			logger.Error("依赖关闭失败", "name", deps[i].name, "err", err.Error())
 		}
+		logger.InfoContext(depCtx, "dependency_close_finished", "name", deps[i].name, "ok", err == nil)
 	}
-	logger.Info("g-aigate 已退出")
 }
 
 // newLogger 按 config.log.level 构造结构化 JSON 日志器（00 §8.3 / 01 §4）。

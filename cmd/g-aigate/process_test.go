@@ -158,13 +158,16 @@ func newProcessUpstream(t *testing.T, raw string) *processUpstream {
 	u := &processUpstream{entered: make(chan upstreamObservation, 128), ended: make(chan upstreamObservation, 128), release: make(chan struct{}), raw: raw}
 	u.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		observation := upstreamObservation{mode: u.mode.Load()}
-		defer func() { u.ended <- observation }()
 		if err := json.NewDecoder(r.Body).Decode(&observation.fields); err != nil {
 			t.Error("cannot decode owned upstream request")
 			w.WriteHeader(500)
 			return
 		}
 		_, _ = io.Copy(io.Discard, r.Body)
+		if respondToFixtureHealthProbe(w, observation.fields) {
+			return
+		}
+		defer func() { u.ended <- observation }()
 		_ = json.Unmarshal(observation.fields["model"], &observation.model)
 		observation.mockHeader = r.Header.Get("X-Mock-Scenario")
 		if r.Header.Get("Authorization") != "Bearer owned-upstream-key" {
@@ -482,6 +485,10 @@ func TestGatewayProcessAcceptance(t *testing.T) {
 			assert.NotContains(t, string(data), "private")
 			assert.NotContains(t, string(data), "owned-upstream-key")
 		}
+		// The independent protocol cases must not become a health-disable test.
+		// A real normal attempt clears their accumulated channel failures.
+		upstream.mode.Store(probeNormal)
+		post(probeChat, 200, "")
 	})
 	t.Run("first frame timeout Overall after frame and cancellation", func(t *testing.T) {
 		upstream.mode.Store(probeFirstFrame)

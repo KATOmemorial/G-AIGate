@@ -146,6 +146,7 @@ func TestChannelAdminProcessAcceptance(t *testing.T) {
 		require.NoError(t, f.db.Where("id = ?", created.ID).First(&before).Error)
 		beforeKey, err := keys.ListByChannel(ctx, created.ID)
 		require.NoError(t, err)
+		beforeHealth := f.healthRecord(t, created.ID)
 		for _, scenario := range []string{"normal", "downtime", "rate_limited", "slow"} {
 			configure("owned-channel-private-a", scenario, "")
 			data := request(admin.Key, "POST", path+"/test", `{"model":"gpt-4o-demo"}`, 200)
@@ -164,11 +165,14 @@ func TestChannelAdminProcessAcceptance(t *testing.T) {
 		configure("owned-channel-private-a", "normal", "")
 		var after store.Channel
 		require.NoError(t, f.db.Where("id = ?", created.ID).First(&after).Error)
+		// Display updates from earlier business attempts are asynchronous; the
+		// manual test must leave Redis and every management column unchanged.
+		after.HealthStatus, after.LastCheckedAt = before.HealthStatus, before.LastCheckedAt
 		assert.Equal(t, before, after)
 		afterKey, err := keys.ListByChannel(ctx, created.ID)
 		require.NoError(t, err)
 		assert.Equal(t, beforeKey, afterKey)
-		assert.Empty(t, f.redis.Keys(), "manual tests do not feed health or create background state")
+		assert.Equal(t, beforeHealth, f.healthRecord(t, created.ID), "manual tests do not feed health")
 		request(admin.Key, "POST", path+"/test", `{"model":"not-mapped"}`, 400)
 	})
 	t.Run("key child lifecycle preserves ciphertext and owner", func(t *testing.T) {
