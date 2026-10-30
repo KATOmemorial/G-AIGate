@@ -59,6 +59,8 @@ B2 检查点贡献：`docker compose up mysql redis` 后 `go test ./internal/sto
 
 冻结登记：2026-10-22，用户在候选提交4eb8192及review清单交付后回复“请你开始工作”，本节随00 v0.10／B4文档确认生效；只登记既有候选效力，不新增范围，不代表实现／验收。
 
-## B5读取与Redis边界（2026-10-30候选，待review）
+## B5读取与Redis边界（2026-10-30，已冻结）
 
-16.1沿ModelRepo.Resolve／ParseFallbackIDs、ChannelRepo读取解析候选，缺失引用／mapping可过滤但SQL错误不伪装空集；不变更其60s配置缓存。16.2拟按候选UpstreamModel读取PriceRepo当前生效价作排序代理，缺价后排，不新增渠道价格维度，也不更改B6计价／历史at缓存口径。16.3自持带permit的Lua及三类breaker key（00 §6.11），共享store.NewRedis的真实client与deadline设置，不把熔断脚本／业务状态放回11.4；健康原语和已交付store公开接口／DDL不变。候选待用户review。
+16.1沿ModelRepo.Resolve／ParseFallbackIDs、ChannelRepo读取解析候选，缺失引用／mapping可过滤但SQL错误不伪装空集；不变更其60s配置缓存。16.2按候选UpstreamModel读取PriceRepo当前生效价作排序代理，缺价后排，不新增渠道价格维度，也不更改B6计价／历史at缓存口径。16.3自持带permit的Lua及三类breaker key（00 §6.11），共享store.NewRedis的真实client与deadline设置，不把熔断脚本／业务状态放回11.4；健康原语和已交付store公开接口／DDL不变。本节已获用户确认并冻结。
+
+冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。

@@ -78,6 +78,8 @@ Authenticator／Principal／Provider 的权威签名在 00 §6.1／§6.2。acces
 | 2026-10-22 | 主会话，13.4验收与13.3开工准备 | 核对13.4 §11.6／§11.10～§11.11，初始化例外已确认、独立审查可合并，main合并7ae24ca／收尾ad16936与本地origin/main同值。前置齐备，下一份13.3沿冻结契约装配；不新增业务范围或将本模块／B3／M0提前登记完成 |
 | 2026-10-22 | 用户授权交付登记，13.3／B3／M0验收完成 | 用户转回独立审查可合并结论并明确授权；核对3f3292d完整审查、补记46c6e70、合并b21c85995b7a35fa145009bf6e91b786ffa336e4与实时远端同值。四份access L2及转发前置均已交付，M0全部冻结场景有独立证据。只更新进度，#26关闭，其余未来路由／配额／会话接管保留，不扩大B3范围 |
 
-## B5正式编排接管（2026-10-30候选，待review）
+## B5正式编排接管（2026-10-30，已冻结）
 
-16.4拟以薄装配适配器先Route再Execute，替换bootstrap临时首健康／单次尝试；access.ChatExecutor／Principal／ExecutionError和错误映射不改，access不import router。逻辑总预算沿proxy Overall且不因回退刷新，最终Cause／WroteHeader／TimedOut供原入口消费；未提交不是自动可重试。未知别名404、零attempt无候选503、已有attempt耗尽返回实际失败，头后错误仍ErrAbortHandler。客户端header／body不开放内部策略参数；AllowAll明确留17.2替换。此为00 §6.11／16.4候选，不重写B3已交付历史或提前授权实现。
+16.4以薄装配适配器先Route再Execute，替换bootstrap临时首健康／单次尝试；access.ChatExecutor／Principal／ExecutionError和错误映射不改，access不import router。逻辑总预算沿proxy Overall且不因回退刷新，最终Cause／WroteHeader／TimedOut供原入口消费；未提交不是自动可重试。未知别名404、零attempt无候选503、已有attempt耗尽返回实际失败，头后错误仍ErrAbortHandler。客户端header／body不开放内部策略参数；AllowAll明确留17.2替换。此为已冻结00 §6.11／16.4消费要求，不重写B3已交付历史；16.4仍须满足其前置及阶段确认。
+
+冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。
