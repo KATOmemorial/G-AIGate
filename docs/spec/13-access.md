@@ -77,3 +77,7 @@ Authenticator／Principal／Provider 的权威签名在 00 §6.1／§6.2。acces
 | 2026-10-21 | 主会话初始化裁定，待用户转交确认 | 按13.4 §3.4允许仅cmd/g-aigate-key使用私有可取消MySQL初始化适配而不直接store.Open；同一10s ctx、真实版本检测／Ping、原配置／仓储／资源回收保留，不改store公开接口或其他入口。实现与完整验证仍待用户转交后交付 |
 | 2026-10-22 | 主会话，13.4验收与13.3开工准备 | 核对13.4 §11.6／§11.10～§11.11，初始化例外已确认、独立审查可合并，main合并7ae24ca／收尾ad16936与本地origin/main同值。前置齐备，下一份13.3沿冻结契约装配；不新增业务范围或将本模块／B3／M0提前登记完成 |
 | 2026-10-22 | 用户授权交付登记，13.3／B3／M0验收完成 | 用户转回独立审查可合并结论并明确授权；核对3f3292d完整审查、补记46c6e70、合并b21c85995b7a35fa145009bf6e91b786ffa336e4与实时远端同值。四份access L2及转发前置均已交付，M0全部冻结场景有独立证据。只更新进度，#26关闭，其余未来路由／配额／会话接管保留，不扩大B3范围 |
+
+## B5正式编排接管（2026-10-30候选，待review）
+
+16.4拟以薄装配适配器先Route再Execute，替换bootstrap临时首健康／单次尝试；access.ChatExecutor／Principal／ExecutionError和错误映射不改，access不import router。逻辑总预算沿proxy Overall且不因回退刷新，最终Cause／WroteHeader／TimedOut供原入口消费；未提交不是自动可重试。未知别名404、零attempt无候选503、已有attempt耗尽返回实际失败，头后错误仍ErrAbortHandler。客户端header／body不开放内部策略参数；AllowAll明确留17.2替换。此为00 §6.11／16.4候选，不重写B3已交付历史或提前授权实现。

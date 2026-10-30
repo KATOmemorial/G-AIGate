@@ -62,3 +62,7 @@ ForwardResult 的结果类别不能替代 HTTP 提交状态：HTTP 200 可伴随
 已有proxy FirstByteMs／Kind口径不变，probe总耗时不混进业务TTFB／p99样本；B4暂不实现Prometheus／OTel或页面。文档已冻结，尚未实现。
 
 冻结登记：2026-10-22，用户在候选提交4eb8192及review清单交付后回复“请你开始工作”，本节随00 v0.10／B4文档确认生效；只登记既有候选效力，不新增范围，不代表实现／验收。
+
+## B5观测与延迟统计消费（2026-10-30候选，待review）
+
+16.2拟自持本实例按(channelID,公开alias)的近期成功完整attempt耗时样本（60s／最多256／至少5／4096键），供latency_first；16.4同步喂样本。它不是proxy FirstByteMs、不是probe、不是Prometheus histogram或跨副本全量P99，不读取MySQL两展示列。#32中展示聚合／error_rate_cache／latency_p99_cache生产仍后置，未来另冻owner，不赋予18反向import router／channel／store权限。B5仅安全attempt／请求摘要与具名TODO，无Prometheus／OTel假实现；18后续按单逻辑请求及每实际attempt区分计数／耗时，沿原标签白名单，不把用户或Key入label。候选以00 §6.11及16.2／16.4为准，待用户review。
