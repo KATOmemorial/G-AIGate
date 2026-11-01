@@ -23,7 +23,7 @@ const (
 )
 
 // Minimal read projections make side-effecting dependencies inaccessible here.
-// M2's public constructor accepts the frozen full repository/health interfaces.
+// The public constructor accepts the frozen full repository/health interfaces.
 type modelReader interface {
 	Resolve(context.Context, string) (*store.ModelAlias, error)
 }
@@ -38,7 +38,7 @@ type healthReader interface {
 	IsAvailable(context.Context, int64) bool
 }
 
-// resolver supplies the M1 core only. It does not implement Router or ordering.
+// resolver builds the candidate set. Ordering and the total budget belong to Router.
 type resolver struct {
 	models          modelReader
 	channels        channelReader
@@ -180,6 +180,9 @@ func (r *resolver) resolve(ctx context.Context, model string, requested RouteStr
 }
 
 func (r *resolver) initial(ctx context.Context, model string, strategy RouteStrategy, alias *store.ModelAlias) ([]store.Channel, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 	if strategy == FallbackChain {
 		ids, err := fallbackIDs(alias)
 		if err != nil {

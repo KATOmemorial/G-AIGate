@@ -37,6 +37,7 @@ channel:
   disable-duration: 60s   # 正亚秒也合法；到期秒向上取整，可能多不足1s（14.3）
 
 router:
+  route-timeout: 2s              # 整条别名／候选读取及排序预算，正整毫秒1ms..1min（16.1）
   breaker-window: 60s             # 熔断滑动窗口（16.3）
   breaker-min-samples: 20         # 熔断最小样本数（16.3）
   breaker-err-threshold: 0.5      # 熔断错误率阈值，(0,1]（16.3）

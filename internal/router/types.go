@@ -62,7 +62,7 @@ type Orderer interface {
 	Order(ctx context.Context, model string, strategy RouteStrategy, candidates []Candidate) ([]Candidate, error)
 }
 
-// RouterOptions configures request planning; construction and budgets arrive in M2.
+// RouterOptions configures request planning; zero RouteTimeout defaults to 2s.
 type RouterOptions struct {
 	DefaultStrategy RouteStrategy
 	RouteTimeout    time.Duration

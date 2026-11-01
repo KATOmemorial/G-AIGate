@@ -114,6 +114,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("router.breaker-err-threshold", 0.5)
 	v.SetDefault("router.breaker-open-duration", 30*time.Second)
 	v.SetDefault("router.default-strategy", "weighted")
+	v.SetDefault("router.route-timeout", 2*time.Second)
 	v.SetDefault("meter.estimate-chars-per-token", 4.0)
 	v.SetDefault("meter.settle-queue-size", 1024)
 }
@@ -169,6 +170,9 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("channel.disable_duration: 须大于 0，实际 %s", c.Channel.DisableDuration))
 	}
 
+	if c.Router.RouteTimeout < time.Millisecond || c.Router.RouteTimeout > time.Minute || c.Router.RouteTimeout%time.Millisecond != 0 {
+		errs = append(errs, "router.route_timeout: 须为1ms..1min的正整毫秒")
+	}
 	if c.Router.BreakerWindow <= 0 {
 		errs = append(errs, fmt.Sprintf("router.breaker_window: 须大于 0，实际 %s", c.Router.BreakerWindow))
 	}
