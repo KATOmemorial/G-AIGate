@@ -748,7 +748,7 @@ func TestResolverCancellationStopsReads(t *testing.T) {
 // Mechanical zero-side-effect witness: production planning has no KeyRepo,
 // picker, secret or Provider capability and no permit/report/ordering calls.
 func TestResolverHasOnlyReadCapabilities(t *testing.T) {
-	for _, name := range []string{"resolver.go", "types.go"} {
+	for _, name := range []string{"resolver.go", "types.go", "router.go"} {
 		source, err := os.ReadFile(name)
 		require.NoError(t, err)
 		file, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
@@ -761,7 +761,10 @@ func TestResolverHasOnlyReadCapabilities(t *testing.T) {
 		ast.Inspect(file, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
 				if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
-					require.NotContains(t, []string{"Pick", "Decrypt", "Chat", "ChatStream", "Acquire", "Complete", "Allow", "OnResult", "ReportRequestResult", "Order", "ListByChannel"}, selector.Sel.Name)
+					require.NotContains(t, []string{"Pick", "Decrypt", "Chat", "ChatStream", "Acquire", "Complete", "Allow", "OnResult", "ReportRequestResult", "ListByChannel"}, selector.Sel.Name)
+					if name != "router.go" {
+						require.NotEqual(t, "Order", selector.Sel.Name)
+					}
 				}
 			}
 			if selector, ok := n.(*ast.SelectorExpr); ok {
