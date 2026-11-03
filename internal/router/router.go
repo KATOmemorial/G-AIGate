@@ -55,10 +55,12 @@ func nilDependency(value any) bool {
 }
 
 func (r *modelRouter) Route(parent context.Context, model string, strategy RouteStrategy) (plan *Plan, err error) {
+	started := time.Now().UTC()
 	// This single deadline covers alias, all candidate reads and ordering. The
 	// dependency calls remain synchronous and must honor this same context.
 	ctx, cancel := context.WithTimeout(parent, r.timeout)
 	defer cancel()
+	ctx = context.WithValue(ctx, routeStartedKey{}, started)
 	defer func() {
 		if err != nil {
 			requestID, _ := middleware.RequestIDFromContext(parent)

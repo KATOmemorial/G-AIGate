@@ -62,6 +62,13 @@ type Orderer interface {
 	Order(ctx context.Context, model string, strategy RouteStrategy, candidates []Candidate) ([]Candidate, error)
 }
 
+// StrategyEngine orders candidates and retains local successful attempt durations.
+// The executor supplies complete successful attempts; probes and failures do not belong here.
+type StrategyEngine interface {
+	Orderer
+	ObserveSuccess(ctx context.Context, channelID int64, model string, elapsed time.Duration)
+}
+
 // RouterOptions configures request planning; zero RouteTimeout defaults to 2s.
 type RouterOptions struct {
 	DefaultStrategy RouteStrategy
