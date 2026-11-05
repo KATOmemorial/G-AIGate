@@ -76,6 +76,8 @@ type ChannelConfig struct {
 
 // RouterConfig 路由与熔断（16 router）。
 type RouterConfig struct {
+	// 单次熔断状态操作预算，默认500ms，正整毫秒1ms..1min（16.3）
+	StateTimeout time.Duration `yaml:"state-timeout" mapstructure:"state-timeout"`
 	// 整条模型解析及排序预算，默认2s，正整毫秒1ms..1min（16.1）
 	RouteTimeout time.Duration `yaml:"route-timeout" mapstructure:"route-timeout"`
 	// 熔断滑动窗口，默认 60s
