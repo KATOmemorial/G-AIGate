@@ -63,6 +63,9 @@ func Load(path string) (*Config, error) {
 	// AutomaticEnv + 全量默认值：所有 key 均在 AllKeys 中，
 	// 保证 Unmarshal 能取到 GAIGATE_* 覆盖值
 	v.AutomaticEnv()
+	if err := checkBreakerScalars(v); err != nil {
+		return nil, err
+	}
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
@@ -115,6 +118,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("router.breaker-open-duration", 30*time.Second)
 	v.SetDefault("router.default-strategy", "weighted")
 	v.SetDefault("router.route-timeout", 2*time.Second)
+	v.SetDefault("router.state-timeout", 500*time.Millisecond)
 	v.SetDefault("meter.estimate-chars-per-token", 4.0)
 	v.SetDefault("meter.settle-queue-size", 1024)
 }
@@ -173,17 +177,20 @@ func (c *Config) validate() error {
 	if c.Router.RouteTimeout < time.Millisecond || c.Router.RouteTimeout > time.Minute || c.Router.RouteTimeout%time.Millisecond != 0 {
 		errs = append(errs, "router.route_timeout: 须为1ms..1min的正整毫秒")
 	}
-	if c.Router.BreakerWindow <= 0 {
-		errs = append(errs, fmt.Sprintf("router.breaker_window: 须大于 0，实际 %s", c.Router.BreakerWindow))
+	if !breakerConfigDuration(c.Router.StateTimeout, time.Minute) {
+		errs = append(errs, "router.state_timeout: 须为1ms..1min的正整毫秒")
 	}
-	if c.Router.BreakerMinSamples <= 0 {
-		errs = append(errs, fmt.Sprintf("router.breaker_min_samples: 须大于 0，实际 %d", c.Router.BreakerMinSamples))
+	if !breakerConfigDuration(c.Router.BreakerWindow, time.Hour) {
+		errs = append(errs, "router.breaker_window: 须为1ms..1h的正整毫秒")
 	}
-	if c.Router.BreakerErrThreshold <= 0 || c.Router.BreakerErrThreshold > 1 {
-		errs = append(errs, fmt.Sprintf("router.breaker_err_threshold: 须在 (0,1]，实际 %g", c.Router.BreakerErrThreshold))
+	if c.Router.BreakerMinSamples < 1 || c.Router.BreakerMinSamples > 1000000 {
+		errs = append(errs, "router.breaker_min_samples: 须在1..1000000")
 	}
-	if c.Router.BreakerOpenDuration <= 0 {
-		errs = append(errs, fmt.Sprintf("router.breaker_open_duration: 须大于 0，实际 %s", c.Router.BreakerOpenDuration))
+	if !breakerConfigThreshold(c.Router.BreakerErrThreshold) {
+		errs = append(errs, "router.breaker_err_threshold: 须为1..1000000的整数百万分比")
+	}
+	if !breakerConfigDuration(c.Router.BreakerOpenDuration, time.Hour) {
+		errs = append(errs, "router.breaker_open_duration: 须为1ms..1h的正整毫秒")
 	}
 	if !validStrategies[c.Router.DefaultStrategy] {
 		errs = append(errs, fmt.Sprintf(
@@ -211,6 +218,43 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config 校验失败: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func breakerConfigDuration(d, max time.Duration) bool {
+	return d >= time.Millisecond && d <= max && d%time.Millisecond == 0
+}
+
+// mapstructure's weak conversions otherwise turn YAML 1.5 into int(1),
+// true into 1, and fractional nanoseconds into an integral Duration. Reject
+// these inputs before Unmarshal; validate still owns ranges and precision.
+func checkBreakerScalars(v *viper.Viper) error {
+	for _, field := range []string{"router.state-timeout", "router.breaker-window", "router.breaker-open-duration", "router.breaker-min-samples", "router.breaker-err-threshold"} {
+		invalid := false
+		switch value := v.Get(field).(type) {
+		case bool:
+			invalid = true
+		case float64:
+			if field != "router.breaker-err-threshold" {
+				invalid = math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value)
+			}
+		}
+		if invalid {
+			return fmt.Errorf("config: %s 须为无截断的数值或时长", strings.ReplaceAll(field, "-", "_"))
+		}
+	}
+	return nil
+}
+
+// Mirror router's private rule without a reverse dependency: at most two
+// binary64 ULPs from the decimal integer-PPM representation, bounds first.
+func breakerConfigThreshold(v float64) bool {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0.000001 || v > 1 {
+		return false
+	}
+	p := math.Round(v * 1000000)
+	canonical := p / 1000000
+	ulp := math.Nextafter(canonical, math.Inf(1)) - canonical
+	return p >= 1 && p <= 1000000 && math.Abs(v-canonical) <= 2*ulp
 }
 
 // checkListenAddr 校验监听地址为 host:port 且端口在 1~65535（10.1 §3 端口规则）。

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"strconv"
 	"time"
 
@@ -128,6 +129,14 @@ func (b *redisBreaker) run(parent context.Context, id int64, op string, args ...
 	// The inspect branch returns before the commit section and performs reads
 	// only. Use the common Script cache fallback supported by miniredis too.
 	cmd := b.script.Run(ctx, b.client, breakerKeys(id), argv...)
+	// A socket deadline can wake netpoll just before the context timer callback.
+	// Once this SAME deadline has elapsed, wait for its cancellation notification
+	// so errors.Is and a parent's custom cause survive the scheduling race. A
+	// shorter Redis socket timeout remains an infrastructure error immediately.
+	var networkError net.Error
+	if deadline, ok := ctx.Deadline(); ok && errors.As(cmd.Err(), &networkError) && networkError.Timeout() && !time.Now().Before(deadline) {
+		<-ctx.Done()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, failure("breaker state canceled", errors.Join(err, context.Cause(ctx), cmd.Err()))
 	}
