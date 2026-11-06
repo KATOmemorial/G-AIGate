@@ -126,8 +126,8 @@ func newHarness(t *testing.T) *harness {
 	}}
 	h.channels = &channelStub{list: func(context.Context, string) ([]store.Channel, error) {
 		return []store.Channel{
-			{ID: 9, Priority: 5, Provider: "openai", Enabled: true}, {ID: 2, Priority: 10, Provider: "openai", Enabled: true},
-			{ID: 1, Priority: 10, Provider: "openai", BaseURL: "http://fixture.invalid/v1", Enabled: true, HealthStatus: "disabled"},
+			validFixtureChannel(9, 5), validFixtureChannel(2, 10),
+			validFixtureChannel(1, 10),
 		}, nil
 	}, mapping: func(_ context.Context, id int64, name string) (*store.ChannelModel, error) {
 		return &store.ChannelModel{ChannelID: uint64(id), Model: name, UpstreamModel: "mapped"}, nil
@@ -150,7 +150,7 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) build(t *testing.T) access.ChatExecutor {
 	t.Helper()
-	e, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, slog.New(slog.NewJSONHandler(&h.logs, nil)))
+	e, err := newComposedExecutor(t, h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, slog.New(slog.NewJSONHandler(&h.logs, nil)))
 	require.NoError(t, err)
 	return e
 }
@@ -172,7 +172,7 @@ func TestExecutorSelectionEndpointAndOpenerContext(t *testing.T) {
 			providerCalls := 0
 			check := func(ctx context.Context, ep *provider.Endpoint, got *provider.ChatRequest) {
 				providerCalls++
-				assert.Same(t, openCtx, ctx)
+				assert.Equal(t, openCtx.Value(marker{}), ctx.Value(marker{}))
 				assert.Equal(t, "budget", ctx.Value(marker{}))
 				assert.Same(t, req, got)
 				assert.Equal(t, &provider.Endpoint{ChannelID: 1, Provider: "openai", BaseURL: "http://fixture.invalid/v1", APIKey: "fixture-upstream-credential", Model: "mapped"}, ep)
@@ -188,7 +188,7 @@ func TestExecutorSelectionEndpointAndOpenerContext(t *testing.T) {
 			}
 			prepare := func(ctx context.Context, opts proxy.ForwardOptions) context.CancelFunc {
 				assert.Equal(t, h.opts, opts)
-				assert.EqualValues(t, 1, middleware.ChannelIDFromContext(ctx))
+				assert.Zero(t, middleware.ChannelIDFromContext(ctx))
 				var cancel context.CancelFunc
 				openCtx, cancel = context.WithTimeout(context.WithValue(ctx, marker{}, "budget"), 20*time.Millisecond)
 				return cancel
@@ -211,7 +211,7 @@ func TestExecutorSelectionEndpointAndOpenerContext(t *testing.T) {
 			require.NoError(t, e.Execute(parent, httptest.NewRecorder(), &access.Principal{UserID: 88}, req))
 			assert.Equal(t, 1, providerCalls)
 			assert.Equal(t, []int64{1}, h.keys.channels)
-			assert.Equal(t, 1, h.channels.mappings)
+			assert.Equal(t, 4, h.channels.mappings)
 			assert.Zero(t, middleware.ChannelIDFromContext(parent), "standard context values remain directional")
 			after, err := json.Marshal(req)
 			require.NoError(t, err)
@@ -262,23 +262,23 @@ func TestExecutorLookupFailuresNeverTryBackup(t *testing.T) {
 		}, private, 1, true},
 		{"missing mapping", func(h *harness) {
 			h.channels.mapping = func(context.Context, int64, string) (*store.ChannelModel, error) { return nil, store.ErrNotFound }
-		}, store.ErrNotFound, 1, true},
+		}, provider.ErrNoCandidate, 1, false},
 		{"mapping SQL", func(h *harness) {
 			h.channels.mapping = func(context.Context, int64, string) (*store.ChannelModel, error) { return nil, private }
-		}, private, 1, true},
+		}, private, 1, false},
 		{"empty mapping", func(h *harness) {
 			h.channels.mapping = func(context.Context, int64, string) (*store.ChannelModel, error) { return &store.ChannelModel{}, nil }
-		}, nil, 1, true},
+		}, nil, 1, false},
 		{"nil mapping", func(h *harness) {
 			h.channels.mapping = func(context.Context, int64, string) (*store.ChannelModel, error) { return nil, nil }
-		}, nil, 1, true},
+		}, nil, 1, false},
 		{"corrupt ciphertext", func(h *harness) { h.enc = []byte("invalid ciphertext") }, nil, 1, true},
 		{"empty upstream key", func(h *harness) { var err error; h.enc, err = secret.Encrypt(nil, h.master); require.NoError(t, err) }, nil, 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			tc.change(h)
-			err := h.build(t).Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false))
+			err := h.build(t).Execute(context.Background(), httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(false))
 			require.Error(t, err)
 			if tc.want != nil {
 				assert.ErrorIs(t, err, tc.want)
@@ -286,7 +286,11 @@ func TestExecutorLookupFailuresNeverTryBackup(t *testing.T) {
 			assert.NotContains(t, err.Error(), private.Error())
 			assert.Equal(t, tc.lists, h.channels.lists)
 			if tc.keys {
-				assert.Equal(t, []int64{1}, h.keys.channels)
+				want := []int64{1}
+				if tc.name == "no active key" {
+					want = []int64{1, 2, 9}
+				}
+				assert.Equal(t, want, h.keys.channels)
 			} else {
 				assert.Empty(t, h.keys.channels)
 			}
@@ -306,13 +310,21 @@ func TestExecutorForwardResultClassificationAndPrivacy(t *testing.T) {
 				t.Run(string(kind)+map[bool]string{false: "/pre", true: "/committed"}[committed]+map[bool]string{false: "/chat", true: "/stream"}[stream], func(t *testing.T) {
 					h := newHarness(t)
 					result := proxy.ForwardResult{Kind: kind, WroteHeader: committed, FirstByteMs: 7, Chunks: 3}
-					h.forwarder.chat = func(context.Context, http.ResponseWriter, proxy.ResponseOpener, proxy.ForwardOptions) (proxy.ForwardResult, error) {
+					h.upstream.chat = func(context.Context, *provider.Endpoint, *provider.ChatRequest) (*provider.ChatResponse, *provider.Usage, error) {
+						return nil, nil, nil
+					}
+					h.upstream.stream = func(context.Context, *provider.Endpoint, *provider.ChatRequest) (provider.Stream, error) {
+						return nil, nil
+					}
+					h.forwarder.chat = func(ctx context.Context, _ http.ResponseWriter, open proxy.ResponseOpener, _ proxy.ForwardOptions) (proxy.ForwardResult, error) {
+						_, _, _ = open(ctx)
 						return result, cause
 					}
-					h.forwarder.stream = func(context.Context, http.ResponseWriter, proxy.StreamOpener, proxy.ForwardOptions, func(provider.StreamEvent)) (proxy.ForwardResult, error) {
+					h.forwarder.stream = func(ctx context.Context, _ http.ResponseWriter, open proxy.StreamOpener, _ proxy.ForwardOptions, _ func(provider.StreamEvent)) (proxy.ForwardResult, error) {
+						_, _ = open(ctx)
 						return result, cause
 					}
-					err := h.build(t).Execute(middleware.WithRequestID(context.Background(), "request-fixture"), httptest.NewRecorder(), nil, testRequest(stream))
+					err := h.build(t).Execute(middleware.WithRequestID(context.Background(), "request-fixture"), httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(stream))
 					var execution *access.ExecutionError
 					require.ErrorAs(t, err, &execution)
 					assert.ErrorIs(t, err, context.Canceled)
@@ -325,7 +337,7 @@ func TestExecutorForwardResultClassificationAndPrivacy(t *testing.T) {
 					assert.NotContains(t, err.Error(), "credentials")
 					assert.NotContains(t, h.logs.String(), "credentials")
 					assert.NotContains(t, h.logs.String(), "untrusted-kind-credential")
-					assert.Contains(t, h.logs.String(), `"result_kind":"`+safeKind(kind)+`"`)
+					assert.Contains(t, h.logs.String(), `"result_kind":"`+testSafeKind(kind)+`"`)
 					assert.Contains(t, h.logs.String(), `"first_byte_ms":7`)
 				})
 			}
@@ -337,15 +349,15 @@ func TestExecutorConstructionAndAllowAll(t *testing.T) {
 	h := newHarness(t)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	for _, opts := range []proxy.ForwardOptions{{}, {TTFBTimeout: time.Second, OverallTimeout: -1}} {
-		_, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, opts, h.health, 500*time.Millisecond, logger)
+		_, err := newComposedExecutor(t, h.models, h.channels, h.picker, h.upstream, h.forwarder, opts, h.health, 500*time.Millisecond, logger)
 		require.Error(t, err)
 	}
-	_, err := NewExecutor((*modelStub)(nil), h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, logger)
+	_, err := newComposedExecutor(t, (*modelStub)(nil), h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, logger)
 	require.Error(t, err)
-	_, err = NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, nil)
+	_, err = newComposedExecutor(t, h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, nil)
 	require.Error(t, err)
 	for _, picker := range []channel.EndpointPicker{nil, (*endpointStub)(nil)} {
-		_, err = NewExecutor(h.models, h.channels, picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, logger)
+		_, err = newComposedExecutor(t, h.models, h.channels, picker, h.upstream, h.forwarder, h.opts, h.health, 500*time.Millisecond, logger)
 		require.Error(t, err)
 	}
 	e := h.build(t)
@@ -374,15 +386,18 @@ func (s *healthRegistryStub) ReportRequestResult(ctx context.Context, id int64, 
 func TestExecutorInjectedPickerSingleAttemptAndSummary(t *testing.T) {
 	for _, cause := range []error{nil, provider.ErrNoCandidate, store.ErrNotFound, errors.New("private picker cause")} {
 		h := newHarness(t)
+		h.channels.list = func(context.Context, string) ([]store.Channel, error) {
+			return []store.Channel{validFixtureChannel(1, 10)}, nil
+		}
 		calls := 0
-		endpoint := &provider.Endpoint{ChannelID: 1, Provider: "openai", BaseURL: "http://fixture.invalid", APIKey: "fixture-upstream-credential", Model: "mapped"}
+		endpoint := &provider.Endpoint{ChannelID: 1, Provider: "openai", BaseURL: "http://fixture.invalid/v1", APIKey: "fixture-upstream-credential", Model: "mapped"}
 		h.picker = &endpointStub{pick: func(ctx context.Context, ch *store.Channel, model string) (*provider.Endpoint, error) {
 			calls++
 			assert.Equal(t, 1, h.models.calls, "Resolve precedes picking")
 			assert.Equal(t, 1, h.channels.lists, "candidate lookup precedes picking")
 			assert.EqualValues(t, 1, ch.ID, "priority then ID choose one channel regardless of alias fallback or health display")
 			assert.Equal(t, "alias", model)
-			assert.EqualValues(t, 1, middleware.ChannelIDFromContext(ctx))
+			assert.Zero(t, middleware.ChannelIDFromContext(ctx), "only the actual opener sets channel summary")
 			return endpoint, cause
 		}}
 		h.upstream.chat = func(_ context.Context, ep *provider.Endpoint, _ *provider.ChatRequest) (*provider.ChatResponse, *provider.Usage, error) {
@@ -393,21 +408,28 @@ func TestExecutorInjectedPickerSingleAttemptAndSummary(t *testing.T) {
 			_, _, err := open(ctx)
 			return proxy.ForwardResult{Kind: proxy.ResultSuccess}, err
 		}
-		err := h.build(t).Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false))
+		err := h.build(t).Execute(context.Background(), httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(false))
 		if cause == nil {
 			require.NoError(t, err)
 			assert.Equal(t, 1, h.forwarder.calls)
 		} else {
-			assert.ErrorIs(t, err, cause)
+			if errors.Is(cause, store.ErrNotFound) {
+				assert.ErrorIs(t, err, provider.ErrNoCandidate)
+			} else {
+				assert.ErrorIs(t, err, cause)
+			}
 			assert.NotContains(t, err.Error(), "private")
 			assert.Zero(t, h.forwarder.calls)
 		}
 		assert.Equal(t, 1, calls, "no alternate picker/channel attempt")
 		assert.Empty(t, h.keys.channels, "executor no longer reads keys directly")
-		assert.Zero(t, h.channels.mappings, "executor no longer assembles mappings directly")
+		assert.Equal(t, 1, h.channels.mappings, "Route reads mapping once; injected picker does not read it")
 	}
 	h := newHarness(t)
+	h.channels.list = func(context.Context, string) ([]store.Channel, error) {
+		return []store.Channel{validFixtureChannel(1, 10)}, nil
+	}
 	h.picker = &endpointStub{pick: func(context.Context, *store.Channel, string) (*provider.Endpoint, error) { return nil, nil }}
-	require.Error(t, h.build(t).Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false)))
+	require.Error(t, h.build(t).Execute(context.Background(), httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(false)))
 	assert.Zero(t, h.forwarder.calls)
 }

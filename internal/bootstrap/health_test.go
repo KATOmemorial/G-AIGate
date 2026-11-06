@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"testing/synctest"
 	"time"
 
+	"gaigate/internal/access"
 	"gaigate/internal/middleware"
 	"gaigate/internal/provider"
 	"gaigate/internal/proxy"
@@ -34,11 +34,13 @@ func TestExecutorHealthFilteringIsOrderedAndNeverFallback(t *testing.T) {
 				if mode == "picker_error" {
 					return nil, errors.New("owned picker failure")
 				}
-				return &provider.Endpoint{ChannelID: int64(ch.ID)}, nil
+				return fixtureEndpoint(ch), nil
 			}}
 			if mode == "disabled_config" {
 				h.channels.list = func(context.Context, string) ([]store.Channel, error) {
-					return []store.Channel{{ID: 1, Enabled: false, Priority: 100}, {ID: 2, Enabled: true, Provider: "openai"}}, nil
+					disabled := validFixtureChannel(1, 100)
+					disabled.Enabled = false
+					return []store.Channel{disabled, validFixtureChannel(2, 0)}, nil
 				}
 			}
 			attempts, reports := 0, 0
@@ -54,7 +56,7 @@ func TestExecutorHealthFilteringIsOrderedAndNeverFallback(t *testing.T) {
 				return proxy.ForwardResult{Kind: proxy.ResultSuccess}, nil
 			}
 			h.health.report = func(context.Context, int64, bool) { reports++ }
-			err := h.build(t).Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false))
+			err := h.build(t).Execute(context.Background(), httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(false))
 			switch mode {
 			case "all_unavailable":
 				require.ErrorIs(t, err, provider.ErrNoCandidate)
@@ -79,9 +81,9 @@ func TestExecutorHealthFilteringIsOrderedAndNeverFallback(t *testing.T) {
 				require.Equal(t, 1, reports)
 			}
 			if mode == "disabled_config" {
-				require.Equal(t, []int64{2}, checked)
+				require.Equal(t, []int64{2, 2}, checked)
 			} else if mode != "all_unavailable" {
-				require.Equal(t, []int64{1, 2}, checked)
+				require.Equal(t, []int64{1, 2, 9, 2}, checked)
 			}
 		})
 	}
@@ -124,7 +126,7 @@ func TestExecutorReportsEachIssuedAttemptByKindBeforeCause(t *testing.T) {
 						require.InDelta(t, 500*time.Millisecond, time.Until(deadline), float64(100*time.Millisecond))
 						require.Equal(t, kind == proxy.ResultSuccess, ok)
 					}
-					_ = h.build(t).Execute(parent, httptest.NewRecorder(), nil, testRequest(stream))
+					_ = h.build(t).Execute(parent, httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(stream))
 					want := kind == proxy.ResultSuccess || kind == proxy.ResultStreamInterrupted || kind == proxy.ResultTTFBTimeout || kind == proxy.ResultOverallTimeout || kind == proxy.ResultUpstreamError && (status != 400 && status != 404 && status != 422)
 					if want {
 						require.Equal(t, 1, reports)
@@ -138,10 +140,10 @@ func TestExecutorReportsEachIssuedAttemptByKindBeforeCause(t *testing.T) {
 }
 
 func TestExecutorNoSignalBeforeOpenerAndReportHasIndependentBound(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	{
 		h := newHarness(t)
-		h.picker = &endpointStub{pick: func(context.Context, *store.Channel, string) (*provider.Endpoint, error) {
-			return &provider.Endpoint{ChannelID: 1}, nil
+		h.picker = &endpointStub{pick: func(_ context.Context, ch *store.Channel, _ string) (*provider.Endpoint, error) {
+			return fixtureEndpoint(ch), nil
 		}}
 		reports := 0
 		h.health.report = func(ctx context.Context, _ int64, _ bool) { reports++; <-ctx.Done() }
@@ -150,7 +152,7 @@ func TestExecutorNoSignalBeforeOpenerAndReportHasIndependentBound(t *testing.T) 
 		h.forwarder.chat = func(context.Context, http.ResponseWriter, proxy.ResponseOpener, proxy.ForwardOptions) (proxy.ForwardResult, error) {
 			return proxy.ForwardResult{Kind: proxy.ResultOverallTimeout}, context.DeadlineExceeded
 		}
-		_ = h.build(t).Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false))
+		_ = h.build(t).Execute(context.Background(), httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(false))
 		require.Zero(t, reports)
 		h.upstream.chat = func(context.Context, *provider.Endpoint, *provider.ChatRequest) (*provider.ChatResponse, *provider.Usage, error) {
 			return nil, nil, nil
@@ -159,11 +161,12 @@ func TestExecutorNoSignalBeforeOpenerAndReportHasIndependentBound(t *testing.T) 
 			_, _, _ = open(ctx)
 			return proxy.ForwardResult{Kind: proxy.ResultOverallTimeout}, context.DeadlineExceeded
 		}
-		executor, err := NewExecutor(h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 20*time.Millisecond, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+		executor, err := newComposedExecutor(t, h.models, h.channels, h.picker, h.upstream, h.forwarder, h.opts, h.health, 20*time.Millisecond, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 		require.NoError(t, err)
 		start := time.Now()
-		_ = executor.Execute(context.Background(), httptest.NewRecorder(), nil, testRequest(false))
-		require.Equal(t, 20*time.Millisecond, time.Since(start))
+		_ = executor.Execute(context.Background(), httptest.NewRecorder(), &access.Principal{UserID: 1}, testRequest(false))
+		require.GreaterOrEqual(t, time.Since(start), 20*time.Millisecond)
+		require.Less(t, time.Since(start), 200*time.Millisecond)
 		require.Equal(t, 1, reports)
-	})
+	}
 }

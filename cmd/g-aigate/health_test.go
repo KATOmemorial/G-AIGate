@@ -67,7 +67,7 @@ func TestGatewayRealHealthAuthSignalsFilteringAndRedisFailure(t *testing.T) {
 	options := testHealthConfig()
 	options.FailureThreshold = 3
 	options.DisableDuration = time.Hour
-	health, err := registerGatewayRoutes(router, db, master, config.ProxyConfig{TTFBTimeout: time.Second, OverallTimeout: 2 * time.Second, StreamBuffer: 1}, options, state, logger)
+	health, err := registerGatewayRoutes(router, db, master, config.ProxyConfig{TTFBTimeout: time.Second, OverallTimeout: 2 * time.Second, StreamBuffer: 1}, options, testRouterConfig(), client, logger)
 	require.NoError(t, err)
 	require.NoError(t, health.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, health.Close(context.Background())) })
@@ -115,7 +115,7 @@ func TestGatewayRealHealthAuthSignalsFilteringAndRedisFailure(t *testing.T) {
 	require.Equal(t, before, after, "request HTTP400 must be ignored")
 	status.Store(503)
 	for count := int32(1); count <= 3; count++ {
-		request(ordinary, http.MethodPost, "/v1/chat/completions", body, 502)
+		request(ordinary, http.MethodPost, "/v1/chat/completions", body, 200)
 		record, err := state.LoadVersioned(context.Background(), int64(primary.ID))
 		require.NoError(t, err)
 		require.Equal(t, count, record.Snapshot.ConsecutiveFailures)

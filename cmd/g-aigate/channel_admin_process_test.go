@@ -194,7 +194,9 @@ func TestChannelAdminProcessAcceptance(t *testing.T) {
 		request(admin.Key, "DELETE", fmt.Sprintf("%s/1/keys/%d", adminChannelsPath, added.ID), "", 404)
 		request(admin.Key, "DELETE", fmt.Sprintf("%s/keys/%d", path, added.ID), "", 204)
 		request(admin.Key, "POST", path+"/test", `{"model":"gpt-4o-demo"}`, 503)
-		request(ordinary, "POST", "/v1/chat/completions", processChat, 503)
+		data = request(ordinary, "POST", "/v1/chat/completions", processChat, 200)
+		c, u, d = frameCounts(t, data)
+		assert.Equal(t, [3]int{8, 1, 1}, [3]int{c, u, d}) // no-Key skips to an eligible channel
 		request(admin.Key, "PUT", keyPath, `{"weight":1,"status":1}`, 200)
 		configure("owned-channel-private-a", "normal", "")
 	})

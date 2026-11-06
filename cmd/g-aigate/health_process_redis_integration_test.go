@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -101,6 +102,9 @@ func newRealHealthFixture(t *testing.T) *realHealthFixture {
 			for _, id := range []uint64{1, 2, f.channel.ID} {
 				if id != 0 {
 					require.NoError(t, f.redis.Del(context.Background(), fmt.Sprintf("gaigate:health:%d", id)).Err())
+					for _, key := range []string{fmt.Sprintf("gaigate:breaker:{%d}", id), fmt.Sprintf("gaigate:breaker:events:{%d}", id), fmt.Sprintf("gaigate:breaker:pending:{%d}", id)} {
+						require.NoError(t, f.redis.Del(context.Background(), key).Err())
+					}
 				}
 			}
 			size, e := f.redis.DBSize(context.Background()).Result()
@@ -322,6 +326,14 @@ func TestHealthProcess_RealRedisB4ScriptAndExpiredProbeBarrier(t *testing.T) {
 	f := newRealHealthFixture(t)
 	p, base := f.start(t, 200*time.Millisecond, 2*time.Second, time.Second)
 	f.setup(t)
+	// A Windows checkout can store CRLF. Execute an owned copy with only line
+	// endings normalized; the historical script and all its assertions stay intact.
+	scriptBytes, err := os.ReadFile(filepath.Join(f.root, "test/e2e/health_lifecycle.sh"))
+	require.NoError(t, err)
+	lfBytes := bytes.ReplaceAll(scriptBytes, []byte("\r\n"), []byte("\n"))
+	script := filepath.Join(t.TempDir(), "health_lifecycle.sh")
+	require.NoError(t, os.WriteFile(script, lfBytes, 0600))
+	t.Logf("owned script copy: original SHA256=%x LF SHA256=%x; only CRLF-to-LF normalization", sha256.Sum256(scriptBytes), sha256.Sum256(lfBytes))
 	t.Run("script rejects unowned and preserves transport failure", func(t *testing.T) {
 		for _, tc := range []struct {
 			name, owner, gateway string
@@ -334,7 +346,7 @@ func TestHealthProcess_RealRedisB4ScriptAndExpiredProbeBarrier(t *testing.T) {
 				temp := t.TempDir()
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				cmd := exec.CommandContext(ctx, findBash(t), "--login", filepath.ToSlash(filepath.Join(f.root, "test/e2e/health_lifecycle.sh")), tc.gateway, f.mockURL)
+				cmd := exec.CommandContext(ctx, findBash(t), "--login", filepath.ToSlash(script), tc.gateway, f.mockURL)
 				cmd.Dir = f.root
 				cmd.Env = append(cleanProcessEnvironment(), "GAIGATE_E2E_OWNED_FIXTURE="+tc.owner, "GAIGATE_E2E_ADMIN_API_KEY="+f.admin, "GAIGATE_E2E_API_KEY="+f.user,
 					"GAIGATE_E2E_CHANNEL_ID="+strconv.FormatUint(f.channel.ID, 10), "GAIGATE_E2E_MOCK_KEY="+f.mockKey, "TMPDIR="+filepath.ToSlash(temp))
@@ -365,7 +377,7 @@ func TestHealthProcess_RealRedisB4ScriptAndExpiredProbeBarrier(t *testing.T) {
 		temp := t.TempDir()
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, findBash(t), "--login", filepath.ToSlash(filepath.Join(f.root, "test/e2e/health_lifecycle.sh")), base, f.mockURL)
+		cmd := exec.CommandContext(ctx, findBash(t), "--login", filepath.ToSlash(script), base, f.mockURL)
 		cmd.Dir = f.root
 		cmd.Env = append(cleanProcessEnvironment(), "GAIGATE_E2E_OWNED_FIXTURE=1", "GAIGATE_E2E_ADMIN_API_KEY="+f.admin, "GAIGATE_E2E_API_KEY="+f.user,
 			"GAIGATE_E2E_CHANNEL_ID="+strconv.FormatUint(f.channel.ID, 10), "GAIGATE_E2E_MOCK_KEY="+f.mockKey, "TMPDIR="+filepath.ToSlash(temp))
