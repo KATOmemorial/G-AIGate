@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"gaigate/internal/access"
@@ -15,6 +16,7 @@ import (
 	"gaigate/internal/middleware"
 	"gaigate/internal/provider/openai"
 	"gaigate/internal/proxy"
+	"gaigate/internal/router"
 	"gaigate/internal/store"
 )
 
@@ -31,7 +33,7 @@ func newGatewayRouter(logger *slog.Logger, probes *middleware.Probes) *gin.Engin
 }
 
 func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg config.ProxyConfig,
-	healthCfg config.ChannelConfig, state store.VersionedHealthState, logger *slog.Logger) (channel.HealthService, error) {
+	healthCfg config.ChannelConfig, routerCfg config.RouterConfig, client *redis.Client, logger *slog.Logger) (channel.HealthService, error) {
 	cache := store.NewConfigCache(0) // Existing store default TTL and invalidation semantics.
 	models := store.NewModelRepo(db, cache)
 	channels := store.NewChannelRepo(db, cache)
@@ -52,7 +54,7 @@ func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg con
 	if err != nil {
 		return nil, err
 	}
-	health, err := channel.NewHealthService(channels, keys, state, tester, channel.HealthOptions{
+	health, err := channel.NewHealthService(channels, keys, store.NewVersionedHealthState(client), tester, channel.HealthOptions{
 		ProbeInterval: healthCfg.ProbeInterval, DisableDuration: healthCfg.DisableDuration,
 		ProbeTimeout: healthCfg.ProbeTimeout, StateTimeout: healthCfg.StateTimeout,
 		FailureThreshold: healthCfg.FailureThreshold, ProbeConcurrency: healthCfg.ProbeConcurrency,
@@ -60,8 +62,26 @@ func registerGatewayRoutes(r gin.IRouter, db *gorm.DB, masterKey []byte, cfg con
 	if err != nil {
 		return nil, err
 	}
-	executor, err := bootstrap.NewExecutor(models, channels, businessPicker, upstream, proxy.NewForwarder(),
-		proxy.ForwardOptions{TTFBTimeout: cfg.TTFBTimeout, OverallTimeout: cfg.OverallTimeout}, health, healthCfg.StateTimeout, logger)
+	strategies, err := router.NewStrategyEngine(store.NewPriceRepo(db, cache), logger)
+	if err != nil {
+		return nil, err
+	}
+	breaker, err := router.NewBreaker(client, router.BreakerOptions{Window: routerCfg.BreakerWindow, OpenDuration: routerCfg.BreakerOpenDuration,
+		StateTimeout: routerCfg.StateTimeout, MinSamples: routerCfg.BreakerMinSamples, ErrorThreshold: routerCfg.BreakerErrThreshold}, logger)
+	if err != nil {
+		return nil, err
+	}
+	planner, err := router.NewRouter(models, channels, health, breaker, strategies, router.RouterOptions{DefaultStrategy: router.RouteStrategy(routerCfg.DefaultStrategy), RouteTimeout: routerCfg.RouteTimeout}, logger)
+	if err != nil {
+		return nil, err
+	}
+	execution, err := router.NewExecutor(businessPicker, upstream, proxy.NewForwarder(), breaker, health, strategies, router.ExecutorOptions{
+		Forward: proxy.ForwardOptions{TTFBTimeout: cfg.TTFBTimeout, OverallTimeout: cfg.OverallTimeout}, StateTimeout: min(routerCfg.StateTimeout, healthCfg.StateTimeout),
+		PreparationTimeout: routerCfg.RouteTimeout, MaxAttempts: routerCfg.MaxAttempts}, logger)
+	if err != nil {
+		return nil, err
+	}
+	executor, err := bootstrap.NewExecutor(planner, execution, cfg.OverallTimeout)
 	if err != nil {
 		return nil, err
 	}
