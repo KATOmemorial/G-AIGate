@@ -70,12 +70,14 @@ state
 printf '%s\n' '[PASS] open skips primary'
 mode hold
 while :; do state; [ "$eligible" = true ] && break; watchdog; sleep 0.05; done
-{
-    printf 'header = "Authorization: Bearer %s"\n' "$user" |
-        curl --disable --silent --noproxy '*' --http1.1 --connect-timeout 1 --max-time 8 --config - \
-        --request POST --header 'Content-Type: application/json' --data-binary "$chat_body" \
-        --output "$work/probe-body" --write-out '%{http_code}\n' --url "$gateway_a/v1/chat/completions" >"$work/probe-status" 2>/dev/null
-} &
+# Keep $! as the actual curl owner so cleanup kills and waits for the request.
+# The short credential config is supplied on stdin, never in argv or work files.
+curl --disable --silent --noproxy '*' --http1.1 --connect-timeout 1 --max-time 8 --config - \
+    --request POST --header 'Content-Type: application/json' --data-binary "$chat_body" \
+    --output "$work/probe-body" --write-out '%{http_code}\n' --url "$gateway_a/v1/chat/completions" \
+    >"$work/probe-status" 2>/dev/null <<EOF &
+header = "Authorization: Bearer $user"
+EOF
 probe_pid=$!
 while :; do state; if [ "$breaker" = half-open ] && [ "$active" -eq 1 ]; then break; fi; watchdog; sleep 0.02; done
 p2=$primary b2=$backup
