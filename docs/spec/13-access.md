@@ -84,8 +84,8 @@ Authenticator／Principal／Provider 的权威签名在 00 §6.1／§6.2。acces
 
 冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。
 
-## B6消费候选（2026-11-10，待用户review）
+## B6消费接缝（2026-11-10，已冻结）
 
 B6入口候选：增加access.ErrQuotaExceeded→429 gaigate_quota_exceeded和access.ErrPriceUnavailable→503 gaigate_price_unavailable，meter使用同一哨兵／同值别名，access不import meter。真实SQL错误500，已提交及主动取消仍沿原协议。17.3替换AllowAll，拒单发生于Route／Quote／Acquire／Pick／Provider之前。meter只读HTTP路由由cmd注入既有Bearer Principal／role，自助本人／跨用户admin，19.1后续替换session，不开header伪身份。
 
-统一候选依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。本节未冻结，不赋予实现或迁移授权，原冻结正文与已交付验收历史保持。
+统一依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。用户接收cee221a候选后回复“请你开始工作”，本节沿原候选确认冻结；实现／迁移按对应L2前置和停点，不由主会话执行，原冻结正文及已交付验收历史保持。

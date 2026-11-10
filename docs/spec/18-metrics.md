@@ -69,8 +69,8 @@ ForwardResult 的结果类别不能替代 HTTP 提交状态：HTTP 200 可伴随
 
 冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。
 
-## B6消费候选（2026-11-10，待用户review）
+## B6消费接缝（2026-11-10，已冻结）
 
 B6安全事件候选：quota_soft_limit、quota_hard_limit、accounting_commit_failed及quota_projection_retry等为固定安全日志事件，带request_id及必要低敏身份；B7才正式绑定metrics，request_id／user_id不得进label。原UsageRepo OnDrop与新SQL财务提交事故含义不同，不能用usage_drop_total代替后者或把投影pending当重复收费。metrics继续纯被动，不反向import业务。
 
-统一候选依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。本节未冻结，不赋予实现或迁移授权，原冻结正文与已交付验收历史保持。
+统一依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。用户接收cee221a候选后回复“请你开始工作”，本节沿原候选确认冻结；实现／迁移按对应L2前置和停点，不由主会话执行，原冻结正文及已交付验收历史保持。
