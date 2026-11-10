@@ -74,3 +74,9 @@ B3 以本机 HTTP/1.1 实测；不承诺未经验证的 HTTP/2／TLS／反向代
 16.4按00 §6.11矩阵消费ForwardResult：提交状态、Kind、UpstreamError.Retryable及原客户端／逻辑剩余预算共同裁定，不能只看首字节或错误链Canceled。每次opener必须使用proxy传入ctx，一次逻辑总预算先覆盖Route，多个attempt不刷新；FirstByteMs仍是单次方法起点到可转发载荷，不再次加连接时间。所有Stream.Close／定时器／下游控制完成后才换候选，并在同一真实WrapWriter／Gin／TCP上验证多attempt头／deadline清理。provider／proxy／middleware签名及已冻结归因不改；接缝缺口交主会话及原owner，不由16.4暗改。B6后续计量边界仍未由本候选提前实现。
 
 冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。
+
+## B6消费候选（2026-11-10，待用户review）
+
+B6仅消费既有同步onChunk及ForwardResult.Usage；成功写出的Chunk／UsageDone才回调，Done／Error不回调，流与非流返回及usage副本约定不变。17.3在router创建独立Collector、捕获非流response的只读信息，不改变Provider／Forwarder公开接口或写出顺序。最终失败／取消不估算收费，记账预算在转发与反馈退出后，不改变ResultKind／WroteHeader／latched Overall或已提交响应。
+
+统一候选依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。本节未冻结，不赋予实现或迁移授权，原冻结正文与已交付验收历史保持。

@@ -83,3 +83,9 @@ Authenticator／Principal／Provider 的权威签名在 00 §6.1／§6.2。acces
 16.4以薄装配适配器先Route再Execute，替换bootstrap临时首健康／单次尝试；access.ChatExecutor／Principal／ExecutionError和错误映射不改，access不import router。逻辑总预算沿proxy Overall且不因回退刷新，最终Cause／WroteHeader／TimedOut供原入口消费；未提交不是自动可重试。未知别名404、零attempt无候选503、已有attempt耗尽返回实际失败，头后错误仍ErrAbortHandler。客户端header／body不开放内部策略参数；AllowAll明确留17.2替换。此为已冻结00 §6.11／16.4消费要求，不重写B3已交付历史；16.4仍须满足其前置及阶段确认。
 
 冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。
+
+## B6消费候选（2026-11-10，待用户review）
+
+B6入口候选：增加access.ErrQuotaExceeded→429 gaigate_quota_exceeded和access.ErrPriceUnavailable→503 gaigate_price_unavailable，meter使用同一哨兵／同值别名，access不import meter。真实SQL错误500，已提交及主动取消仍沿原协议。17.3替换AllowAll，拒单发生于Route／Quote／Acquire／Pick／Provider之前。meter只读HTTP路由由cmd注入既有Bearer Principal／role，自助本人／跨用户admin，19.1后续替换session，不开header伪身份。
+
+统一候选依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。本节未冻结，不赋予实现或迁移授权，原冻结正文与已交付验收历史保持。

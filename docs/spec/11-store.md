@@ -64,3 +64,9 @@ B2 检查点贡献：`docker compose up mysql redis` 后 `go test ./internal/sto
 16.1沿ModelRepo.Resolve／ParseFallbackIDs、ChannelRepo读取解析候选，缺失引用／mapping可过滤但SQL错误不伪装空集；不变更其60s配置缓存。16.2按候选UpstreamModel读取PriceRepo当前生效价作排序代理，缺价后排，不新增渠道价格维度，也不更改B6计价／历史at缓存口径。16.3自持带permit的Lua及三类breaker key（00 §6.11），共享store.NewRedis的真实client与deadline设置，不把熔断脚本／业务状态放回11.4；健康原语和已交付store公开接口／DDL不变。本节已获用户确认并冻结。
 
 冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。
+
+## B6消费候选（2026-11-10，待用户review）
+
+B6新增候选归17.2：000002迁移增加GroupID／报价快照、token列int64与request_id唯一键及quota_outbox，SettlementRepo同步事务写明细／任务并做同ID同完整载荷幂等。旧UsageRepo.Record无返回／OnDrop／drain保留，但批重试须与新唯一键适配，不用INSERT IGNORE吞异载荷；正式财务不走该队列。17.3的000003调整bills为user/group/month键。旧000001与B2验收不改；迁移前旧usage/bills非空必须拒绝并另定数据方案，down不能丢账。旧QuotaCounter仍单key原语，17.2自持六key投影Lua，不宣称11.4已交付业务幂等。
+
+统一候选依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。本节未冻结，不赋予实现或迁移授权，原冻结正文与已交付验收历史保持。

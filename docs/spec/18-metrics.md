@@ -68,3 +68,9 @@ ForwardResult 的结果类别不能替代 HTTP 提交状态：HTTP 200 可伴随
 16.2自持本实例按(channelID,公开alias)的近期成功完整attempt耗时样本（60s／最多256／至少5／4096键），供latency_first；16.4同步喂样本。它不是proxy FirstByteMs、不是probe、不是Prometheus histogram或跨副本全量P99，不读取MySQL两展示列。#32中展示聚合／error_rate_cache／latency_p99_cache生产仍后置，未来另冻owner，不赋予18反向import router／channel／store权限。B5仅安全attempt／请求摘要与具名TODO，无Prometheus／OTel假实现；18后续按单逻辑请求及每实际attempt区分计数／耗时，沿原标签白名单，不把用户或Key入label。本节以已冻结00 §6.11及16.2／16.4为准。
 
 冻结登记：2026-10-30，用户在主会话对8666eb4候选回复“我确定”，本节随00 v0.11／16-L1／四份L2生效；正文要求沿已确认候选，不代表代码实现／验收。
+
+## B6消费候选（2026-11-10，待用户review）
+
+B6安全事件候选：quota_soft_limit、quota_hard_limit、accounting_commit_failed及quota_projection_retry等为固定安全日志事件，带request_id及必要低敏身份；B7才正式绑定metrics，request_id／user_id不得进label。原UsageRepo OnDrop与新SQL财务提交事故含义不同，不能用usage_drop_total代替后者或把投影pending当重复收费。metrics继续纯被动，不反向import业务。
+
+统一候选依据：[00 §6.12](00-总纲.md)／[17-L1](17-meter.md)。本节未冻结，不赋予实现或迁移授权，原冻结正文与已交付验收历史保持。
