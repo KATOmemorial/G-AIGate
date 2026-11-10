@@ -147,7 +147,7 @@ type writerSnapshot struct {
 	localChannel int64
 }
 
-func assembledGateway(t *testing.T, db *gorm.DB, master []byte, cfg config.ProxyConfig, logs *gatewayLogs) (*httptest.Server, <-chan writerSnapshot) {
+func assembledGateway(t *testing.T, db *gorm.DB, master []byte, cfg config.ProxyConfig, logs *gatewayLogs, decorate ...func(http.Handler) http.Handler) (*httptest.Server, <-chan writerSnapshot) {
 	t.Helper()
 	logger := newLogger(logs, "info")
 	r := newGatewayRouter(logger, &middleware.Probes{})
@@ -161,12 +161,16 @@ func assembledGateway(t *testing.T, db *gorm.DB, master []byte, cfg config.Proxy
 	mr := miniredis.RunT(t)
 	client := store.NewRedis(store.RedisOptions{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
-	health, err := registerGatewayRoutes(r, db, master, cfg, testHealthConfig(), store.NewVersionedHealthState(client), logger)
+	health, err := registerGatewayRoutes(r, db, master, cfg, testHealthConfig(), testRouterConfig(), client, logger)
 	require.NoError(t, err)
 	require.NoError(t, health.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, health.Close(context.Background())) })
 	waitHealthRound(t, logs)
-	srv := httptest.NewServer(r)
+	var handler http.Handler = r
+	for _, wrap := range decorate {
+		handler = wrap(handler)
+	}
+	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return srv, stats
 }
@@ -296,7 +300,7 @@ func TestGatewayAssemblySelectionErrorsAndAbort(t *testing.T) {
 		w.WriteHeader(500)
 	}))
 	defer tie.Close()
-	fallback := gatewayChannel(t, db, master, "fallback", "alias", "wrong-fallback", backup.URL, "upstream-backup", 5)
+	_ = gatewayChannel(t, db, master, "fallback", "alias", "wrong-fallback", backup.URL, "upstream-backup", 5)
 	chosen := gatewayChannel(t, db, master, "primary", "alias", "upstream-mapped", primary.URL, "revoked-key", 10)
 	_ = gatewayChannel(t, db, master, "tie-later-id", "alias", "wrong-tie", tie.URL, "upstream-tie", 10)
 	require.NoError(t, db.Model(&store.ChannelKey{}).Where("channel_id = ?", chosen.ID).Update("status", store.ChannelKeyStatusRevoked).Error)
@@ -308,7 +312,8 @@ func TestGatewayAssemblySelectionErrorsAndAbort(t *testing.T) {
 	// 14.2 replaces the old first-Key assumption. Keep this protocol/error
 	// matrix on one active Key; dedicated SWRR tests cover bad selected slots.
 	require.NoError(t, db.Model(&store.ChannelKey{}).Where("channel_id = ? AND provider_key_enc = ?", chosen.ID, []byte("bad later ciphertext")).Update("status", 0).Error)
-	model := store.ModelAlias{Name: "alias", DefaultChannelID: &fallback.ID, FallbackIDs: fmt.Sprintf("[%d]", fallback.ID)}
+	// This protocol/error regression explicitly configures one candidate; multi-attempt TCP behavior has its own coverage.
+	model := store.ModelAlias{Name: "alias", Strategy: "fallback_chain", DefaultChannelID: &chosen.ID, FallbackIDs: "[]"}
 	models := store.NewModelRepo(db, store.NewConfigCache(0))
 	require.NoError(t, models.Create(context.Background(), &model))
 	require.NoError(t, models.Create(context.Background(), &store.ModelAlias{Name: "configured-without-channel"}))
@@ -382,7 +387,7 @@ func TestGatewayAssemblySelectionErrorsAndAbort(t *testing.T) {
 	assert.Equal(t, before, primaryCalls.Load())
 	require.NoError(t, db.Model(&store.ChannelKey{}).Where("id = ?", active.ID).Update("provider_key_enc", enc).Error)
 	require.NoError(t, db.Where("channel_id = ? AND model = ?", chosen.ID, "alias").Delete(&store.ChannelModel{}).Error)
-	post(request, 500, "gaigate_internal")
+	post(request, 503, "gaigate_no_candidate")
 	assert.Equal(t, before, primaryCalls.Load())
 	require.NoError(t, db.Create(&store.ChannelModel{ChannelID: chosen.ID, Model: "alias", UpstreamModel: "upstream-mapped"}).Error)
 	mode.Store(7)
@@ -458,7 +463,7 @@ func TestGatewayAssemblyRejectsInvalidConfigurationBeforeRoutes(t *testing.T) {
 		logs := newGatewayLogs()
 		logger := newLogger(logs, "info")
 		r := newGatewayRouter(logger, &middleware.Probes{})
-		_, err := registerGatewayRoutes(r, nil, tc.key, tc.cfg, testHealthConfig(), nil, logger)
+		_, err := registerGatewayRoutes(r, nil, tc.key, tc.cfg, testHealthConfig(), testRouterConfig(), nil, logger)
 		require.Error(t, err)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest("GET", "/v1/models", nil))
@@ -742,4 +747,8 @@ func waitHealthRound(t *testing.T, logs *gatewayLogs) {
 			t.Fatal("initial health round did not finish")
 		}
 	}
+}
+
+func testRouterConfig() config.RouterConfig {
+	return config.RouterConfig{MaxAttempts: 3, RouteTimeout: 2 * time.Second, StateTimeout: 500 * time.Millisecond, DefaultStrategy: "latency_first", BreakerWindow: time.Minute, BreakerMinSamples: 20, BreakerErrThreshold: 0.5, BreakerOpenDuration: 30 * time.Second}
 }

@@ -76,6 +76,8 @@ type ChannelConfig struct {
 
 // RouterConfig 路由与熔断（16 router）。
 type RouterConfig struct {
+	// 最大实际opener次数，默认3，1..16（16.4）。
+	MaxAttempts int `yaml:"max-attempts" mapstructure:"max-attempts"`
 	// 单次熔断状态操作预算，默认500ms，正整毫秒1ms..1min（16.3）
 	StateTimeout time.Duration `yaml:"state-timeout" mapstructure:"state-timeout"`
 	// 整条模型解析及排序预算，默认2s，正整毫秒1ms..1min（16.1）

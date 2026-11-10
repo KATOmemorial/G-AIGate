@@ -1,183 +1,60 @@
-// Package bootstrap contains temporary B3 orchestration, consumed only by cmd.
+// Package bootstrap provides assembly adapters, consumed only by cmd.
 package bootstrap
 
 import (
 	"context"
 	"errors"
-	"log/slog"
-	"math"
+	"gaigate/internal/access"
+	"gaigate/internal/provider"
+	"gaigate/internal/router"
 	"net/http"
 	"reflect"
-	"sort"
 	"time"
-
-	"gaigate/internal/access"
-	"gaigate/internal/channel"
-	"gaigate/internal/middleware"
-	"gaigate/internal/provider"
-	"gaigate/internal/proxy"
-	"gaigate/internal/store"
 )
 
-// AllowAll is the explicit B3 precheck stub.
+// AllowAll remains the explicit precheck stub.
 // TODO(17.2): replace at assembly with real quota checks/settlement (台账#22).
 type AllowAll struct{}
 
 func (AllowAll) Precheck(context.Context, *access.Principal) error { return nil }
 
 type executor struct {
-	models       store.ModelRepo
-	channels     store.ChannelRepo
-	picker       channel.EndpointPicker
-	upstream     provider.Provider
-	forwarder    proxy.Forwarder
-	opts         proxy.ForwardOptions
-	logger       *slog.Logger
-	health       channel.HealthRegistry
-	stateTimeout time.Duration
+	planner  router.Router
+	executor router.Executor
+	overall  time.Duration
 }
 
-// NewExecutor receives the endpoint picker and proxy options from assembly.
-// Endpoint selection, model mapping and decryption belong to channel (14.2).
-func NewExecutor(models store.ModelRepo, channels store.ChannelRepo, picker channel.EndpointPicker,
-	upstream provider.Provider, forwarder proxy.Forwarder,
-	opts proxy.ForwardOptions, health channel.HealthRegistry, stateTimeout time.Duration, logger *slog.Logger) (access.ChatExecutor, error) {
-	for _, dependency := range []any{models, channels, picker, upstream, forwarder, health, logger} {
-		if nilDependency(dependency) {
-			return nil, errors.New("bootstrap: missing dependency")
+// NewExecutor covers Route and Execute with one logical budget. Selection and
+// attempt policy belong entirely to router.
+func NewExecutor(planner router.Router, execution router.Executor, overall time.Duration) (access.ChatExecutor, error) {
+	if nilDependency(planner) || nilDependency(execution) || overall <= 0 {
+		return nil, errors.New("bootstrap: invalid executor dependencies or budget")
+	}
+	return &executor{planner, execution, overall}, nil
+}
+func (e *executor) Execute(parent context.Context, w http.ResponseWriter, p *access.Principal, req *provider.ChatRequest) error {
+	if parent == nil || nilDependency(w) || p == nil || req == nil {
+		return errors.New("bootstrap: invalid execution input")
+	}
+	ctx, cancel := context.WithTimeout(parent, e.overall)
+	defer cancel()
+	boundary := func(cause error) error {
+		if ctx.Err() != nil {
+			return &access.ExecutionError{Cause: errors.Join(cause, ctx.Err(), context.Cause(ctx)), TimedOut: ctx.Err() == context.DeadlineExceeded}
 		}
+		return cause
 	}
-	if opts.TTFBTimeout <= 0 || opts.OverallTimeout <= 0 || stateTimeout < time.Millisecond {
-		return nil, errors.New("bootstrap: invalid forwarding options")
+	if err := boundary(nil); err != nil {
+		return err
 	}
-	return &executor{models: models, channels: channels, picker: picker, upstream: upstream,
-		forwarder: forwarder, opts: opts, health: health, stateTimeout: stateTimeout, logger: logger}, nil
+	plan, err := e.planner.Route(ctx, req.Model, router.Auto)
+	if err = boundary(err); err != nil {
+		return err
+	}
+	// Preserve the actual executor classification, including latched Overall
+	// followed by net/http Canceled and any already committed response.
+	return e.executor.Execute(ctx, w, p, plan, req)
 }
-
-type stageError struct {
-	message string
-	cause   error
-}
-
-func (e *stageError) Error() string             { return e.message }
-func (e *stageError) Unwrap() error             { return e.cause }
-func failure(message string, cause error) error { return &stageError{message: message, cause: cause} }
-
-func (e *executor) Execute(ctx context.Context, w http.ResponseWriter, _ *access.Principal, req *provider.ChatRequest) error {
-	if req == nil {
-		return failure("bootstrap: missing request", nil)
-	}
-	alias, err := e.models.Resolve(ctx, req.Model)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return failure("bootstrap: unknown model alias", errors.Join(access.ErrModelNotFound, err))
-		}
-		return failure("bootstrap: model lookup failed", err)
-	}
-	if alias == nil {
-		return failure("bootstrap: invalid model alias", nil)
-	}
-	channels, err := e.channels.ListActiveByModel(ctx, req.Model)
-	if err != nil {
-		return failure("bootstrap: channel lookup failed", err)
-	}
-	if len(channels) == 0 {
-		return failure("bootstrap: no channel", provider.ErrNoCandidate)
-	}
-	// TODO(16.1): replace priority/id selection with routing (台账#21).
-	// TODO(16.4): replace this single attempt; B3 never retries/falls back (台账#21).
-	// Sort a private slice: health is a pre-attempt filter, never a retry path.
-	channels = append([]store.Channel(nil), channels...)
-	sort.Slice(channels, func(i, j int) bool {
-		return channels[i].Priority > channels[j].Priority || channels[i].Priority == channels[j].Priority && channels[i].ID < channels[j].ID
-	})
-	var ch store.Channel
-	for _, candidate := range channels {
-		if candidate.Enabled && candidate.ID > 0 && candidate.ID <= math.MaxInt64 && e.health.IsAvailable(ctx, int64(candidate.ID)) {
-			ch = candidate
-			break
-		}
-	}
-	if ch.ID == 0 {
-		return failure("bootstrap: no healthy channel", provider.ErrNoCandidate)
-	}
-	if ch.ID == 0 || ch.ID > math.MaxInt64 || ch.Provider != e.upstream.Name() {
-		return failure("bootstrap: invalid channel configuration", nil)
-	}
-	ctx = middleware.WithChannelID(ctx, int64(ch.ID))
-	endpoint, err := e.picker.Pick(ctx, &ch, req.Model)
-	if err != nil {
-		return failure("bootstrap: endpoint selection failed", err)
-	}
-	if endpoint == nil {
-		return failure("bootstrap: missing endpoint", nil)
-	}
-	var result proxy.ForwardResult
-	attempted := false
-	if req.Stream {
-		result, err = e.forwarder.Forward(ctx, w, func(openCtx context.Context) (provider.Stream, error) {
-			attempted = true
-			return e.upstream.ChatStream(openCtx, endpoint, req)
-		}, e.opts, nil)
-	} else {
-		result, err = e.forwarder.ForwardNonStream(ctx, w, func(openCtx context.Context) (*provider.ChatResponse, *provider.Usage, error) {
-			attempted = true
-			return e.upstream.Chat(openCtx, endpoint, req)
-		}, e.opts)
-	}
-	requestID, _ := middleware.RequestIDFromContext(ctx)
-	level := slog.LevelInfo
-	if err != nil {
-		level = slog.LevelError
-	}
-	// TODO(18.1): consume result timing/kind without recounting opener time (台账#25).
-	e.logger.Log(ctx, level, "upstream attempt finished", "request_id", requestID, "channel_id", endpoint.ChannelID,
-		"result_kind", safeKind(result.Kind), "wrote_header", result.WroteHeader,
-		"first_byte_ms", result.FirstByteMs, "chunks", result.Chunks)
-	if ok, report := healthSignal(result.Kind, err); attempted && report {
-		// Preserve request values but do not let the spent upstream/client budget
-		// swallow a valid signal. This synchronous cleanup has its own hard bound.
-		reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stateTimeout)
-		start := time.Now()
-		e.health.ReportRequestResult(reportCtx, endpoint.ChannelID, ok)
-		cancel()
-		e.logger.InfoContext(ctx, "health result reported", "request_id", requestID, "channel_id", endpoint.ChannelID,
-			"health_report_ms", time.Since(start).Milliseconds())
-	}
-	if err != nil {
-		return &access.ExecutionError{Cause: err, WroteHeader: result.WroteHeader,
-			TimedOut: result.Kind == proxy.ResultTTFBTimeout || result.Kind == proxy.ResultOverallTimeout}
-	}
-	return nil
-}
-
-func healthSignal(kind proxy.ResultKind, err error) (ok, report bool) {
-	switch kind {
-	case proxy.ResultSuccess:
-		return true, true
-	case proxy.ResultStreamInterrupted, proxy.ResultTTFBTimeout, proxy.ResultOverallTimeout:
-		return false, true
-	case proxy.ResultUpstreamError:
-		var upstream *provider.UpstreamError
-		if errors.As(err, &upstream) && (upstream.StatusCode == 400 || upstream.StatusCode == 404 || upstream.StatusCode == 422) {
-			return false, false
-		}
-		return false, true
-	default:
-		return false, false
-	}
-}
-
-func safeKind(kind proxy.ResultKind) string {
-	switch kind {
-	case proxy.ResultSuccess, proxy.ResultUpstreamError, proxy.ResultStreamInterrupted, proxy.ResultTTFBTimeout,
-		proxy.ResultOverallTimeout, proxy.ResultClientCanceled, proxy.ResultWriteError:
-		return string(kind)
-	default:
-		return "unknown"
-	}
-}
-
 func nilDependency(value any) bool {
 	if value == nil {
 		return true
@@ -185,7 +62,6 @@ func nilDependency(value any) bool {
 	switch reflect.ValueOf(value).Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return reflect.ValueOf(value).IsNil()
-	default:
-		return false
 	}
+	return false
 }

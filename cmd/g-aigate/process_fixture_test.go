@@ -10,6 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,6 +208,25 @@ func newProcessFixture(t *testing.T) *gatewayProcessFixture {
 	f.mockURL = "http://" + addr
 	f.mock = startOwnedProcess(t, root, f.mockBinary, append(cleanProcessEnvironment(), "MOCK_ADDR="+addr))
 	waitProcessHealth(t, f.mock, f.mockURL)
+	// Formal routing may use the seed fallback, and startup health probes run
+	// before the fixture can replace database URLs. Own the frozen seed address
+	// throughout the gateway lifetime and transparently route it to our mock.
+	listener, err := net.Listen("tcp", "127.0.0.1:18080")
+	require.NoError(t, err, "fixture must exclusively own the seed loopback URL")
+	target, err := url.Parse(f.mockURL)
+	require.NoError(t, err)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, _ error) {
+		if r.Context().Err() == nil {
+			w.WriteHeader(502)
+		}
+	}
+	seedServer := httptest.NewUnstartedServer(proxy)
+	seedServer.Listener = listener
+	seedServer.Start()
+	t.Cleanup(seedServer.Close) // gateway owners register later and close first
+	require.Equal(t, "http://127.0.0.1:18080", seedServer.URL)
+	t.Log("owned seed loopback proxy routes startup probes and fallback to this fixture's mock")
 	return f
 }
 

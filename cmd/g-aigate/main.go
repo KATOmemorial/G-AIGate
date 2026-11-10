@@ -107,7 +107,7 @@ func main() {
 
 	// readyz 注册 Redis ping（同 mysql：check 自带超时，防挂起拖住 /readyz）
 	probes.Register("redis", redisReadinessCheck(redisClient))
-	health, err := registerGatewayRoutes(r, db, masterKey, cfg.Proxy, cfg.Channel, store.NewVersionedHealthState(redisClient), logger)
+	health, err := registerGatewayRoutes(r, db, masterKey, cfg.Proxy, cfg.Channel, cfg.Router, redisClient, logger)
 	if err != nil {
 		_ = redisClient.Close()
 		_ = sqlDB.Close()

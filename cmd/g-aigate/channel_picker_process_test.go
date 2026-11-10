@@ -71,7 +71,7 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 		require.NoError(t, json.Unmarshal(data, &detail))
 		return detail
 	}
-	_ = create(t, "owned-swrr-backup", mappedBackup, 100, []string{keyBackup})
+	backup := create(t, "owned-swrr-backup", mappedBackup, 100, []string{keyBackup})
 	created := create(t, "owned-swrr-main", mappedMain, 200, []string{keyA, keyB})
 	require.Len(t, created.Keys, 2)
 	require.Less(t, created.Keys[0].ID, created.Keys[1].ID)
@@ -81,7 +81,7 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 		t.Helper()
 		request(t, admin.Key, "PUT", keyPath(index), map[string]int{"weight": weight, "status": status}, 200)
 	}
-	expectedMainCalls := 0
+	expectedMainCalls, expectedBackupCalls := 0, 0
 	chatBody := map[string]any{"model": "gpt-4o-demo", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hi"}}}
 	pick := func(t *testing.T, expected string) {
 		t.Helper()
@@ -97,8 +97,20 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 	failure := func(t *testing.T, status int, code string, upstreamCalled bool) {
 		t.Helper()
 		resp, data := request(t, ordinary, "POST", "/v1/chat/completions", chatBody, status)
-		processEnvelope(t, resp, data, status, code)
-		assert.Equal(t, float64(created.ID), summaryFor(t, gateway.logs, resp)["channel_id"])
+		if status == 200 {
+			expectedBackupCalls++
+			c, u, d := frameCounts(t, data)
+			assert.Equal(t, [3]int{7, 1, 1}, [3]int{c, u, d})
+			assert.Contains(t, string(data), mappedBackup)
+			assert.Equal(t, float64(backup.ID), summaryFor(t, gateway.logs, resp)["channel_id"])
+		} else {
+			processEnvelope(t, resp, data, status, code)
+			want := float64(0)
+			if upstreamCalled {
+				want = float64(created.ID)
+			}
+			assert.Equal(t, want, summaryFor(t, gateway.logs, resp)["channel_id"])
+		}
 		if upstreamCalled {
 			expectedMainCalls++
 		}
@@ -131,10 +143,10 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 		setKey(t, 1, 3, 1)
 		pick(t, "B")
 	})
-	t.Run("no Key and corrupt selected slot never use backup", func(t *testing.T) {
+	t.Run("no Key skips to backup and corrupt selected slot stops", func(t *testing.T) {
 		setKey(t, 0, 1, 0)
 		setKey(t, 1, 1, 0)
-		failure(t, 503, "gaigate_no_candidate", false)
+		failure(t, 200, "", false)
 		request(t, admin.Key, "POST", path+"/test", map[string]string{"model": "gpt-4o-demo"}, 503)
 		setKey(t, 0, 1, 1)
 		setKey(t, 1, 1, 1)
@@ -150,16 +162,16 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 			Update("provider_key_enc", rows[0].ProviderKeyEnc).Error)
 		pick(t, "A")
 	})
-	t.Run("upstream failure consumes one slot without retry", func(t *testing.T) {
+	t.Run("upstream failure consumes one slot and falls back without another Key", func(t *testing.T) {
 		configure(t, keyA, "downtime", 4)
 		pick(t, "B")
-		failure(t, 502, "gaigate_upstream_error", true)
+		failure(t, 200, "", true)
 		pick(t, "B")
 		configure(t, keyA, "normal", 4)
 		pick(t, "A")
 	})
 	for _, key := range f.redis.Keys() {
-		assert.True(t, strings.HasPrefix(key, "gaigate:health:"), "SWRR must not create distributed state")
+		assert.True(t, strings.HasPrefix(key, "gaigate:health:") || strings.HasPrefix(key, "gaigate:breaker:"), "only health and the formal breaker own Redis state; no SWRR keys")
 	}
 	// Join every process before counting complete upstream logs or scanning secrets.
 	gateway.stop(t)
@@ -178,7 +190,7 @@ func TestChannelPickerProcessSWRRAcceptance(t *testing.T) {
 		}
 	}
 	assert.Equal(t, expectedMainCalls, actualMain, "each business/probe call makes exactly its planned single upstream attempt")
-	assert.Zero(t, actualBackup, "eligible backup channel is never tried")
+	assert.Equal(t, expectedBackupCalls, actualBackup, "only no-Key and retryable uncommitted failures use one backup; never another Key")
 	for _, process := range []*ownedProcess{gateway, f.mock} {
 		for _, raw := range secrets {
 			assert.False(t, strings.Contains(process.logs.String(), raw), "process log credential leak")

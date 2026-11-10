@@ -402,7 +402,10 @@ func TestGatewayProcessAcceptance(t *testing.T) {
 			defer func() {
 				require.NoError(t, f.db.Model(&store.ChannelKey{}).Where("id = ?", primaryKeys[0].ID).Update("status", 1).Error)
 			}()
-			post(processChat, 503, "gaigate_no_candidate")
+			resp, _ := post(processChat, 200, "")
+			var backup store.Channel
+			require.NoError(t, f.db.Where("name = ?", "demo-fallback").First(&backup).Error)
+			require.EqualValues(t, backup.ID, summaryFor(t, gateway.logs, resp)["channel_id"], "no-Key primary skips to the fixture-owned fallback")
 		}()
 		func() {
 			require.NoError(t, f.db.Model(&store.ChannelKey{}).Where("id = ?", primaryKeys[0].ID).Update("provider_key_enc", []byte("corrupt fixture ciphertext")).Error)
@@ -425,12 +428,28 @@ func TestGatewayProcessAcceptance(t *testing.T) {
 		}()
 	})
 	t.Run("owned mock faults interrupted and TTFB", func(t *testing.T) {
+		assertFallback := func(resp *http.Response, data []byte, firstKind string) {
+			c, u, d := frameCounts(t, data)
+			assert.Equal(t, [3]int{8, 1, 1}, [3]int{c, u, d})
+			var backup store.Channel
+			require.NoError(t, f.db.Where("name = ?", "demo-fallback").First(&backup).Error)
+			assert.EqualValues(t, backup.ID, summaryFor(t, gateway.logs, resp)["channel_id"])
+			kinds := []any{}
+			for _, entry := range gateway.logs.entries(t, resp.Header.Get("X-Request-Id")) {
+				if entry["msg"] == "upstream attempt finished" {
+					kinds = append(kinds, entry["result_kind"])
+				}
+			}
+			assert.Equal(t, []any{firstKind, "success"}, kinds, "one failed primary then one actual backup, no alternate Key")
+		}
 		for _, scenario := range []string{"downtime", "rate_limited"} {
 			configureOwnedMock(t, f, scenario, "")
-			post(processChat, 502, "gaigate_upstream_error")
+			resp, data := post(processChat, 200, "")
+			assertFallback(resp, data, "upstream_error")
 		}
 		configureOwnedMock(t, f, "downtime", `{"downtime_mode":"refuse"}`)
-		post(processChat, 502, "gaigate_upstream_error")
+		resp, fallbackData := post(processChat, 200, "")
+		assertFallback(resp, fallbackData, "upstream_error")
 		configureOwnedMock(t, f, "interrupted", "")
 		got := curlProcess(t, f, base, created.Key, processChat)
 		assert.Equal(t, 200, got.status)
@@ -453,9 +472,9 @@ func TestGatewayProcessAcceptance(t *testing.T) {
 		configureOwnedMock(t, f, "slow", "")
 		offset := len(processLogEntries(t, f.mock.logs))
 		got = curlProcess(t, f, base, created.Key, processChat)
-		assert.Equal(t, 502, got.status)
+		assert.Equal(t, 200, got.status)
 		assert.Zero(t, got.code)
-		assert.Contains(t, string(got.body), "gaigate_upstream_timeout")
+		assertFallback(&http.Response{StatusCode: got.status, Header: http.Header{"X-Request-Id": []string{got.requestID}}}, got.body, "ttfb_timeout")
 		assert.GreaterOrEqual(t, got.first, 0.75)
 		assert.Less(t, got.first, 1.9)
 		waitProcessLog(t, f.mock.logs, offset, func(e map[string]any) bool { return e["scenario"] == "slow" && e["outcome"] == "canceled" })

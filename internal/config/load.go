@@ -119,6 +119,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("router.default-strategy", "weighted")
 	v.SetDefault("router.route-timeout", 2*time.Second)
 	v.SetDefault("router.state-timeout", 500*time.Millisecond)
+	v.SetDefault("router.max-attempts", 3)
 	v.SetDefault("meter.estimate-chars-per-token", 4.0)
 	v.SetDefault("meter.settle-queue-size", 1024)
 }
@@ -174,6 +175,15 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("channel.disable_duration: 须大于 0，实际 %s", c.Channel.DisableDuration))
 	}
 
+	if c.Router.MaxAttempts < 1 || c.Router.MaxAttempts > 16 {
+		errs = append(errs, "router.max_attempts: 须在1..16")
+	}
+	// Check remaining capacity before addition: Duration overflow and sub-ms
+	// truncation must not allow an invalid permit lease to reach assembly.
+	state := min(c.Router.StateTimeout, c.Channel.StateTimeout)
+	if state > 0 && c.Proxy.OverallTimeout > 0 && (state > 24*time.Hour-500*time.Millisecond || c.Proxy.OverallTimeout > 24*time.Hour-500*time.Millisecond-state) {
+		errs = append(errs, "proxy.overall_timeout: 加一次有效state_timeout及500ms不得超过24h")
+	}
 	if c.Router.RouteTimeout < time.Millisecond || c.Router.RouteTimeout > time.Minute || c.Router.RouteTimeout%time.Millisecond != 0 {
 		errs = append(errs, "router.route_timeout: 须为1ms..1min的正整毫秒")
 	}
@@ -228,7 +238,7 @@ func breakerConfigDuration(d, max time.Duration) bool {
 // true into 1, and fractional nanoseconds into an integral Duration. Reject
 // these inputs before Unmarshal; validate still owns ranges and precision.
 func checkBreakerScalars(v *viper.Viper) error {
-	for _, field := range []string{"router.state-timeout", "router.breaker-window", "router.breaker-open-duration", "router.breaker-min-samples", "router.breaker-err-threshold"} {
+	for _, field := range []string{"router.max-attempts", "router.state-timeout", "router.breaker-window", "router.breaker-open-duration", "router.breaker-min-samples", "router.breaker-err-threshold"} {
 		invalid := false
 		switch value := v.Get(field).(type) {
 		case bool:

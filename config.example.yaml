@@ -37,6 +37,7 @@ channel:
   disable-duration: 60s   # 正亚秒也合法；到期秒向上取整，可能多不足1s（14.3）
 
 router:
+  max-attempts: 3                 # 实际opener次数1..16（16.4），跳过候选不计次
   state-timeout: 500ms            # 单次熔断状态预算，正整毫秒1ms..1min（16.3）
   route-timeout: 2s              # 整条别名／候选读取及排序预算，正整毫秒1ms..1min（16.1）
   breaker-window: 60s             # 熔断窗口，正整毫秒1ms..1h（16.3）
