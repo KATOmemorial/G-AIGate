@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"math/big"
 	"net"
 	"os"
 	"strconv"
@@ -59,6 +60,13 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// Preserve explicit YAML null before defaults can conceal it. An effective
+	// environment override still takes precedence, just as for other fields.
+	var meterNull bool
+	if fields, ok := v.Get("meter").(map[string]any); ok {
+		value, exists := fields["estimate-chars-per-token"]
+		meterNull = exists && value == nil
+	}
 	setDefaults(v)
 	// AutomaticEnv + 全量默认值：所有 key 均在 AllKeys 中，
 	// 保证 Unmarshal 能取到 GAIGATE_* 覆盖值
@@ -66,6 +74,15 @@ func Load(path string) (*Config, error) {
 	if err := checkBreakerScalars(v); err != nil {
 		return nil, err
 	}
+	if meterNull && os.Getenv("GAIGATE_METER_ESTIMATE_CHARS_PER_TOKEN") == "" {
+		return nil, meterRatioError()
+	}
+	charsPerToken, err := meterScalar(v.Get("meter.estimate-chars-per-token"))
+	if err != nil {
+		return nil, err
+	}
+	// Avoid mapstructure's bool, collection and other weak scalar conversions.
+	v.Set("meter.estimate-chars-per-token", charsPerToken)
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
@@ -208,6 +225,9 @@ func (c *Config) validate() error {
 			c.Router.DefaultStrategy))
 	}
 
+	if !meterConfigRatio(c.Meter.EstimateCharsPerToken) {
+		errs = append(errs, meterRatioError().Error())
+	}
 	if c.Meter.SettleQueueSize <= 0 {
 		errs = append(errs, fmt.Sprintf("meter.settle_queue_size: 须大于 0，实际 %d", c.Meter.SettleQueueSize))
 	}
@@ -232,6 +252,52 @@ func (c *Config) validate() error {
 
 func breakerConfigDuration(d, max time.Duration) bool {
 	return d >= time.Millisecond && d <= max && d%time.Millisecond == 0
+}
+
+func meterRatioError() error {
+	return fmt.Errorf("config: meter.estimate_chars_per_token 须为0.001..1024的有限数值，最多六位十进制小数")
+}
+
+// Mirror 17.1's shortest-decimal rule without adding a config -> meter edge.
+// Unlike breaker thresholds, this rule has no ULP normalization allowance.
+func meterConfigRatio(value float64) bool {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0.001 || value > 1024 {
+		return false
+	}
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(value, 'f', -1, 64))
+	return ok && new(big.Rat).Mul(r, big.NewRat(1000000, 1)).IsInt()
+}
+
+func meterScalar(raw any) (float64, error) {
+	var value float64
+	switch v := raw.(type) {
+	case float64:
+		value = v
+	case int:
+		value = float64(v)
+	case int64:
+		value = float64(v)
+	case uint64:
+		value = float64(v)
+	case string:
+		var err error
+		value, err = strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, meterRatioError()
+		}
+		// A string must not become valid merely by losing decimal precision
+		// during conversion to binary64 (e.g. "1.00000000000000001").
+		r, ok := new(big.Rat).SetString(strings.TrimSpace(v))
+		if !ok || !new(big.Rat).Mul(r, big.NewRat(1000000, 1)).IsInt() {
+			return 0, meterRatioError()
+		}
+	default:
+		return 0, meterRatioError()
+	}
+	if !meterConfigRatio(value) {
+		return 0, meterRatioError()
+	}
+	return value, nil
 }
 
 // mapstructure's weak conversions otherwise turn YAML 1.5 into int(1),

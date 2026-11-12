@@ -47,7 +47,7 @@ router:
   default-strategy: weighted     # weighted|cost_first|latency_first|fallback_chain（16.2）
 
 meter:
-  estimate-chars-per-token: 4    # 估算回退：每 token 字符数（17.1）
+  estimate-chars-per-token: 4    # 确定性字符代理；有限0.001..1024，最多六位十进制小数（17.1）
   settle-queue-size: 1024        # 落账队列长度（11.3）
 
 secret:
